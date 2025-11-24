@@ -337,6 +337,17 @@ mpirun -np ${ntasks} ./cice >&! \$ICE_RUNLOG_FILE
 EOFR
 endif
 
+else if (${ICE_MACHCOMP} =~ apptainer*) then
+if (${ICE_COMMDIR} =~ serial*) then
+cat >> ${jobfile} << EOFR
+./cice >&! \$ICE_RUNLOG_FILE
+EOFR
+else
+cat >> ${jobfile} << EOFR
+mpirun -np ${ntasks} --bind-to none --map-by slot apptainer exec --bind \${I_MPI_ROOT}:\${I_MPI_ROOT} \${SIF_FILE} ${ICE_RUNDIR}/cice  >&! \$ICE_RUNLOG_FILE
+EOFR
+endif
+
 
 #=======
 else

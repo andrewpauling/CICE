@@ -154,6 +154,17 @@ cat >> ${jobfile} << EOFB
 ###SBATCH --mail-user username@domain.com
 EOFB
 
+else if (${ICE_MACHINE} =~ apptainer*) then
+if (${runlength} > 0) set queue = "milan"
+cat >> ${jobfile} << EOFB
+#SBATCH --job-name=${ICE_CASENAME}
+#SBATCH --account=${acct}
+#SBATCH --partition=${queue}
+#SBATCH --time=${batchtime}
+#SBATCH --nodes=${nnodes}
+#SBATCH --ntasks=${ntasks}
+EOFB
+
 else if (${ICE_MACHINE} =~ narwhal*) then
 if (${runlength} <= 0) then
   set batchtime = "00:29:59"
