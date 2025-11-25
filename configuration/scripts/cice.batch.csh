@@ -522,6 +522,11 @@ cat >> ${jobfile} << EOFB
 # nothing to do
 EOFB
 
+else if (${ICE_MACHINE} =~ icebox*) then
+cat >> ${jobfile} << EOFB
+# nothing to do
+EOFB
+
 
 else
   echo "${0} ERROR: ${ICE_MACHINE} unknown"
