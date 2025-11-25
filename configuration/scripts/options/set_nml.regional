@@ -1,0 +1,25 @@
+dt = 3600.0
+runtype = 'initial'
+year_init      = 2005
+use_leap_years = .true.
+use_restart_time = .false.
+ice_ic  = '/nesi/project/vuw03548/paulinan/cice_setup/data/ic/gx1/iced_gx1_v5_regrid.nc'
+grid_format = 'nc'
+grid_type   = 'regional'
+grid_ice    = 'C'
+grid_file   = '/nesi/project/vuw03548/paulinan/cice_setup/data/grid_pskrips.nc'
+kmt_file    = '/nesi/project/vuw03548/paulinan/cice_setup/data/kmt_pskrips.nc'
+bathymetry_file = bathymetry_file = '/nesi/project/vuw03548/paulinan/cice_setup/data/bath_pskrips.nc'
+maskhalo_remap = .true.
+maskhalo_bound = .true.
+fyear_init      = 2005
+atm_data_format = 'nc'
+atm_data_type   = 'JRA55'
+atm_data_version = ''
+atm_data_dir    = /nesi/project/vuw03548/paulinan/cice_setup/data/forcing/gx1'
+precip_units    = 'mks'
+ocn_data_dir    = '/nesi/project/vuw03548/paulinan/cice_setup/data/'
+nx_global       = 210
+ny_global       = 240
+block_size_x    = 42
+block_size_y    = 48
