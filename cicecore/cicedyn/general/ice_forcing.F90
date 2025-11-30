@@ -2249,6 +2249,8 @@
       ! check for grid version using fortran INDEX intrinsic
       if (index(trim(atm_data_dir),'gx1') > 0) then
          grd = 'gx1'
+      else if (index(trim(atm_data_dir),'pskrips') > 0) then
+         grd = 'pskrips'
       else if (index(trim(atm_data_dir),'gx3') > 0) then
          grd = 'gx3'
       else if (index(trim(atm_data_dir),'tx1') > 0) then
