@@ -1,7 +1,7 @@
 #!/bin/csh -f
 
 setenv ICE_CASENAME   pskrips
-setenv ICE_SANDBOX    ${MY_CICE_DIR}
+setenv ICE_SANDBOX    ${CICE_DIR}
 setenv ICE_MACHINE    icebox
 setenv ICE_ENVNAME    apptainer
 setenv ICE_MACHCOMP   icebox_apptainer
@@ -12,7 +12,7 @@ setenv ICE_OBJDIR     ${ICE_RUNDIR}/compile
 setenv ICE_RSTDIR     ${ICE_RUNDIR}/restart
 setenv ICE_HSTDIR     ${ICE_RUNDIR}/history
 setenv ICE_LOGDIR     ${ICE_CASEDIR}/logs
-setenv ICE_DRVOPT     cice
+setenv ICE_DRVOPT     nuopc/pskrips
 setenv ICE_TARGET     libcice
 setenv ICE_IOTYPE     netcdf    # binary, netcdf, pio1, pio2
 setenv ICE_CLEANBUILD true
