@@ -16,3 +16,4 @@ caselist*
 # Ignore run and log directories for coupled model
 run
 configuration/scripts/logs
+*.i90
