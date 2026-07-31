@@ -1,0 +1,17 @@
+name: cice_setup
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.11
+  - numpy
+  - scipy
+  - pandas
+  - xarray
+  - dask
+  - netcdf4
+  - cftime
+  - cf_xarray
+  - bottleneck
+  - xesmf
+  - esmpy=8.6.0
