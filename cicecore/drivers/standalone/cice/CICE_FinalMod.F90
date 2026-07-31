@@ -14,6 +14,7 @@
       use ice_communicate, only: my_task, master_task
       use ice_exit, only: end_run, abort_ice
       use ice_fileunits, only: nu_diag, release_all_fileunits
+      use ice_restore_forcing, only: restore_forcing_finalize
       use icepack_intfc, only: icepack_warnings_flush, icepack_warnings_aborted
 
       implicit none
@@ -53,6 +54,7 @@
       endif
 
 !echmod      if (nu_diag /= 6) close (nu_diag) ! diagnostic output
+      call restore_forcing_finalize()
       call release_all_fileunits
 
    !-------------------------------------------------------------------
