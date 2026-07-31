@@ -304,6 +304,13 @@ srun -n ${ntasks} -c ${nthrds} ./cice >&! \$ICE_RUNLOG_FILE
 EOFR
 
 #=======
+else if (${ICE_MACHCOMP} =~ raapoi*) then
+cat >> ${jobfile} << EOFR
+setenv I_MPI_PMI_LIBRARY /usr/lib64/libpmi2.so
+srun -n ${ntasks} ./cice >&! \$ICE_RUNLOG_FILE
+EOFR
+
+#=======
 else if (${ICE_MACHCOMP} =~ high_Sierra*) then
 cat >> ${jobfile} << EOFR
 mpirun -np ${ntasks} ./cice >&! \$ICE_RUNLOG_FILE
