@@ -124,7 +124,7 @@
          ocn_data_format   , & ! 'bin'=binary or 'nc'=netcdf
          atm_data_type     , & ! 'default', 'monthly', 'ncar', 'box2001'
                                ! 'hadgem', 'oned', 'calm', 'uniform'
-                               ! 'JRA55' or 'JRA55do'
+                               ! 'JRA55', 'JRA55do', or 'ERA5'
          atm_data_version  , & ! date of atm_forcing file creation
          bgc_data_type     , & ! 'default', 'clim'
          ocn_data_type     , & ! 'default', 'clim', 'ncar', 'oned', 'calm', 'box2001'
@@ -305,10 +305,11 @@
       endif
 
       if (use_leap_years .and. (index(trim(atm_data_type),'JRA55') == 0 .and. &
+                                index(trim(atm_data_type),'ERA5')  == 0 .and. &
                                 trim(atm_data_type) /= 'hycom'       .and. &
                                 trim(atm_data_type) /= 'box2001'))   then
          write(nu_diag,*) 'use_leap_years option is currently only supported for'
-         write(nu_diag,*) 'JRA55, JRA55do, default , and box2001 atmospheric data'
+         write(nu_diag,*) 'JRA55, JRA55do, ERA5, default, and box2001 atmospheric data'
          call abort_ice(error_message=subname, file=__FILE__, line=__LINE__)
       endif
 
@@ -320,6 +321,8 @@
       if (trim(atm_data_type) == 'ncar') then
          call NCAR_files(fyear)
       elseif (index(trim(atm_data_type),'JRA55') > 0) then
+         call JRA55_files(fyear)
+      elseif (index(trim(atm_data_type),'ERA5') > 0) then
          call JRA55_files(fyear)
       elseif (trim(atm_data_type) == 'hadgem') then
          call hadgem_files(fyear)
@@ -658,6 +661,8 @@
       if (trim(atm_data_type) == 'ncar') then
          call ncar_data
       elseif (index(trim(atm_data_type),'JRA55') > 0) then
+         call JRA55_data
+      elseif (index(trim(atm_data_type),'ERA5') > 0) then
          call JRA55_data
       elseif (trim(atm_data_type) == 'hadgem') then
          call hadgem_data
@@ -1598,7 +1603,8 @@
          i = index(data_file,'.nc') - 5
          tmpname = data_file
          write(data_file,'(a,i4.4,a)') tmpname(1:i), yr, '.nc'
-      elseif (index(trim(atm_data_type),'JRA55') > 0) then ! netcdf
+      elseif (index(trim(atm_data_type),'JRA55') > 0 .or. &
+              index(trim(atm_data_type),'ERA5')  > 0) then ! netcdf
          i = index(data_file,'.nc') - 5
          tmpname = data_file
          write(data_file,'(a,i4.4,a)') tmpname(1:i), yr, '.nc'
@@ -2249,6 +2255,8 @@
       ! check for grid version using fortran INDEX intrinsic
       if (index(trim(atm_data_dir),'gx1') > 0) then
          grd = 'gx1'
+      else if (index(trim(atm_data_dir),'pskrips') > 0) then
+         grd = 'pskrips'
       else if (index(trim(atm_data_dir),'gx3') > 0) then
          grd = 'gx3'
       else if (index(trim(atm_data_dir),'tx1') > 0) then
