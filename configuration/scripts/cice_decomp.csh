@@ -120,6 +120,25 @@ else if (${grid} == 'tx1') then
     set blckx = 10; set blcky = 10
   endif
 
+else if (${grid} == 'tx0.1') then
+   set nxglob = 3600
+   set nyglob = 2400
+   if (${cicepes} <= 16) then
+     set blckx = 900; set blcky = 600
+   else if (${cicepes} <= 64) then
+     set blckx = 200; set blcky = 200
+   else
+     set blckx = 100; set blcky = 100
+   endif
+   
+
+else if (${grid} == 'era5') then
+  set nxglob=1440
+  set nyglob=720
+  if (${cicepes} <= 64) then
+    set blckx = 60; set blcky=60
+  endif
+
 # this is for unit testing
 else if (${grid} == 'none') then
   set nxglob = 1

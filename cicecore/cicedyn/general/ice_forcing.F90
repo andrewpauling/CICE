@@ -124,11 +124,11 @@
          ocn_data_format   , & ! 'bin'=binary or 'nc'=netcdf
          atm_data_type     , & ! 'default', 'monthly', 'ncar', 'box2001'
                                ! 'hadgem', 'oned', 'calm', 'uniform'
-                               ! 'JRA55' or 'JRA55do'
+                               ! 'JRA55', 'JRA55do', ERA5 or 'ACCESS'
          atm_data_version  , & ! date of atm_forcing file creation
          bgc_data_type     , & ! 'default', 'clim'
          ocn_data_type     , & ! 'default', 'clim', 'ncar', 'oned', 'calm', 'box2001'
-                               ! 'hadgem_sst' or 'hadgem_sst_uvocn', 'uniform'
+                               ! 'hadgem_sst' or 'hadgem_sst_uvocn', 'uniform', 'access'
          ice_data_type     , & ! 'latsst', 'box2001', 'boxslotcyl', etc
          ice_data_conc     , & ! 'p5','p8','p9','c1','parabolic', 'box2001', etc
          ice_data_dist     , & ! 'box2001','gauss', 'uniform', etc
@@ -305,10 +305,11 @@
       endif
 
       if (use_leap_years .and. (index(trim(atm_data_type),'JRA55') == 0 .and. &
+                                index(trim(atm_data_type),'ERA5') == 0 .and. &
                                 trim(atm_data_type) /= 'hycom'       .and. &
                                 trim(atm_data_type) /= 'box2001'))   then
          write(nu_diag,*) 'use_leap_years option is currently only supported for'
-         write(nu_diag,*) 'JRA55, JRA55do, default , and box2001 atmospheric data'
+         write(nu_diag,*) 'JRA55, JRA55do, ERA5, default , and box2001 atmospheric data'
          call abort_ice(error_message=subname, file=__FILE__, line=__LINE__)
       endif
 
@@ -321,6 +322,10 @@
          call NCAR_files(fyear)
       elseif (index(trim(atm_data_type),'JRA55') > 0) then
          call JRA55_files(fyear)
+      elseif (index(trim(atm_data_type),'ERA5') > 0) then
+         call ERA5_files(fyear)
+      elseif (index(trim(atm_data_type),'ACCESS') > 0) then
+         call ACCESS_files(fyear)
       elseif (trim(atm_data_type) == 'hadgem') then
          call hadgem_files(fyear)
       elseif (trim(atm_data_type) == 'monthly') then
@@ -538,6 +543,10 @@
       elseif (trim(ocn_data_type) == 'ncar') then
          call ocn_data_ncar_init
 !        call ocn_data_ncar_init_3D
+      elseif (trim(ocn_data_type) == 'access') then
+         call ocn_data_access_init
+      elseif (trim(ocn_data_type) == 'ecco') then
+         call ocn_data_ecco_init
 
       elseif (trim(ocn_data_type) == 'hycom') then
          call ocn_data_hycom_init
@@ -659,6 +668,10 @@
          call ncar_data
       elseif (index(trim(atm_data_type),'JRA55') > 0) then
          call JRA55_data
+      elseif (index(trim(atm_data_type),'ERA5') > 0) then
+         call ERA5_data
+      elseif (index(trim(atm_data_type),'ACCESS') > 0) then
+         call ACCESS_data
       elseif (trim(atm_data_type) == 'hadgem') then
          call hadgem_data
       elseif (trim(atm_data_type) == 'monthly') then
@@ -773,6 +786,10 @@
       elseif (trim(ocn_data_type) == 'ncar' .or.  &
               trim(ocn_data_type) == 'ISPOL') then
          call ocn_data_ncar(dt)
+      elseif (trim(ocn_data_type) == 'access') then
+         call ocn_data_access(dt)
+      elseif (trim(ocn_data_type) == 'ecco') then
+         call ocn_data_ecco(dt)
       elseif (trim(ocn_data_type) == 'hadgem_sst' .or.  &
               trim(ocn_data_type) == 'hadgem_sst_uvocn') then
          call ocn_data_hadgem(dt)
@@ -1602,6 +1619,14 @@
          i = index(data_file,'.nc') - 5
          tmpname = data_file
          write(data_file,'(a,i4.4,a)') tmpname(1:i), yr, '.nc'
+      elseif (index(trim(atm_data_type),'ERA5') > 0) then ! netcdf
+         i = index(data_file,'.nc') - 5
+         tmpname = data_file
+         write(data_file,'(a,i4.4,a)') tmpname(1:i), yr, '.nc'
+      elseif (index(trim(atm_data_type),'ACCESS') > 0) then ! netcdf
+         i = index(data_file,'.nc') - 5
+         tmpname = data_file
+         write(data_file,'(a,i4.4,a)') tmpname(1:i), yr, '.nc'
       else                                     ! LANL/NCAR naming convention
          i = index(data_file,'.dat') - 5
          tmpname = data_file
@@ -2316,6 +2341,256 @@
 
 !=======================================================================
 
+      subroutine ACCESS_files(yr)
+
+      ! find the ACCESS-ESM1-5 files:
+      ! This subroutine finds the ACCESS-ESM1-5 atm forcing files based on settings
+      ! in atm_data_type and atm_data_dir.  Because the filenames are not
+      ! entirely consistent, we need a flexible method.
+      !
+      ! atm_data_type could be ACCESS-ESM1-5 with/without _grid appended
+      ! atm_data_dir could contain ACCESS-ESM1-5 or not
+      ! actual files could have grid in name in two location or not at all
+      !
+      ! The files will generally be of the format
+      !    $atm_data_type/[ACCESS-ESM1-5,'']/8XDAILY/[ACCESS-ESM1-5][_$grid,'']_03hr_forcing[_$grid,'']_$year.nc
+      ! The options defined by cnt try several versions of paths/filenames
+      ! As a user,
+      !    atm_data_type should be set to ACCESS-ESM1-5, etc.
+      !       where xxx can be any set of characters.  The _xxx if included will be ignored.
+      !       Historically, these were set to JRA55_gx1 and so forth but the _gx1 is no longer needed
+      !       but this is still allowed for backwards compatibility.  atm_data_type_prefix
+      !       is atm_data_type with _ and everything after _ removed.
+      !    atm_data_dir should be set to ${CICE_DATA_root}/forcing/$grid/[ACCESS-ESM1-5,'']
+      !       The [ACCESS-ESM1-5,''] at the end of the atm_data_dir is optional to provide backwards
+      !       compatibility and if not included, will be appended automaticaly using
+      !       the atm_data_type_prefix value.  The grid is typically gx1, gx3, tx1, or similar.
+      ! In general, we recommend using the following format
+      !    atm_data_type = [ACCESS-ESM1-5]
+      !    atm_data_dir = ${CICE_DATA_root}/forcing/$grid
+
+      integer (kind=int_kind), intent(in) :: &
+           yr         ! current forcing year
+
+      ! local variables
+      character(len=16) :: &
+           grd        ! gx3, gx1, tx1
+
+      character(len=64) :: &
+           atm_data_type_prefix  ! atm_data_type prefix
+
+      integer (kind=int_kind) :: &
+           cnt    , & ! search for files
+           strind     ! string index
+
+      logical :: &
+           exists     ! file existance
+
+      character(len=*), parameter :: subname = '(ACCESS_files)'
+
+      if (local_debug .and. my_task == master_task) write(nu_diag,*) subname,'fdbg start'
+
+      ! this could be ACCESS-ESM1-5[do] or ACCESS-ESM1-5[do]_grid, drop the _grid if set
+      atm_data_type_prefix = trim(atm_data_type)
+      strind = index(trim(atm_data_type),'_')
+      if (strind > 0) then
+         atm_data_type_prefix = atm_data_type(1:strind-1)
+      endif
+
+      ! check for grid version using fortran INDEX intrinsic
+      if (index(trim(atm_data_dir),'gx1') > 0) then
+         grd = 'gx1'
+      else if (index(trim(atm_data_dir),'pskrips') > 0) then
+         grd = 'pskrips'
+      else if (index(trim(atm_data_dir),'gx3') > 0) then
+         grd = 'gx3'
+      else if (index(trim(atm_data_dir),'tx1') > 0) then
+         grd = 'tx1'
+      else
+         call abort_ice(error_message=subname//' unknown grid type')
+      endif
+
+      ! cnt represents the possible file format options and steps thru them until one is found
+      exists = .false.
+      cnt = 1
+      do while (.not.exists .and. cnt <= 6)
+
+         if (cnt == 1) uwind_file = trim(atm_data_dir)//'/'//trim(atm_data_type_prefix)//     &
+                                    '/DAILY/'//trim(atm_data_type_prefix)//'_'//trim(grd)// &
+                                    '_daily_forcing'//trim(atm_data_version)//'_2090.nc'
+
+         if (cnt == 2) uwind_file = trim(atm_data_dir)//'/'//trim(atm_data_type_prefix)//                  &
+                                    '/DAILY/'//trim(atm_data_type_prefix)//'_daily_forcing_'//trim(grd)// &
+                                    trim(atm_data_version)//'_2090.nc'
+
+         if (cnt == 3) uwind_file = trim(atm_data_dir)//'/'//trim(atm_data_type_prefix)// &
+                                    '/DAILY/'//trim(atm_data_type_prefix)//             &
+                                    '_daily_forcing'//trim(atm_data_version)//'_2090.nc'
+
+         if (cnt == 4) uwind_file = trim(atm_data_dir)//                                      &
+                                    '/DAILY/'//trim(atm_data_type_prefix)//'_'//trim(grd)// &
+                                    '_daily_forcing'//trim(atm_data_version)//'_2090.nc'
+
+         if (cnt == 5) uwind_file = trim(atm_data_dir)//                                                   &
+                                    '/DAILY/'//trim(atm_data_type_prefix)//'_daily_forcing_'//trim(grd)// &
+                                    trim(atm_data_version)//'_2090.nc'
+
+         if (cnt == 6) uwind_file = trim(atm_data_dir)//                                  &
+                                    '/DAILY/'//trim(atm_data_type_prefix)//             &
+                                    '_daily_forcing'//trim(atm_data_version)//'_2090.nc'
+
+
+         call file_year(uwind_file,yr)
+         INQUIRE(FILE=uwind_file,EXIST=exists)
+
+         if (debug_forcing .and. (my_task == master_task)) then
+            write(nu_diag,*) subname,cnt,exists,trim(uwind_file)
+         endif
+
+         cnt = cnt + 1
+      enddo
+
+      if (.not.exists) then
+         write(nu_diag,*) subname,' atm_data_dir = ',trim(atm_data_dir)
+         write(nu_diag,*) subname,' atm_data_type_prefix = ',trim(atm_data_type_prefix)
+         write(nu_diag,*) subname,' atm_data_version = ',trim(atm_data_version)
+         call abort_ice(error_message=subname//' could not find forcing file')
+      endif
+
+      if (my_task == master_task) then
+         write (nu_diag,'(2a)') ' '
+         write (nu_diag,'(2a)') subname,'Atmospheric data files:'
+         write (nu_diag,'(2a)') subname,trim(uwind_file)
+      endif
+
+    end subroutine ACCESS_files
+
+   subroutine ERA5_files(yr)
+
+      ! find the ERA5 files:
+      ! This subroutine finds the JRA5 atm forcing files based on settings
+      ! in atm_data_type and atm_Eata_dir.  Because the filenames are not
+      ! entirely consistent, we need a flexible method.
+      !
+      ! atm_data_type could be ERA5 appended
+      ! atm_data_dir could contain ERA5 not
+      ! actual files could have grid in name in two location or not at all
+      !
+      ! The files will generally be of the format
+      !    $atm_data_type/[ERA5,'']/8XDAILY/ERA5_$grid,'']_03hr_forcing[_$grid,'']_$year.nc
+      ! The options defined by cnt try several versions of paths/filenames
+      ! As a user,
+      !    atm_data_type should be set to ERA5, ERA5_xxx
+      !       where xxx can be any set of characters.  The _xxx if included will be ignored.
+      !       Historically, these were set to ERA5_gx1 and so forth but the _gx1 is no longer needed
+      !       but this is still allowed for backwards compatibility.  atm_data_type_prefix
+      !       is atm_data_type with _ and everything after _ removed.
+      !    atm_data_dir should be set to ${CICE_DATA_root}/forcing/$grid/[ERA5,'']
+      !       The ERA5 at the end of the atm_data_dir is optional to provide backwards
+      !       compatibility and if not included, will be appended automaticaly using
+      !       the atm_data_type_prefix value.  The grid is typically gx1, gx3, tx1, or similar.
+      ! In general, we recommend using the following format
+      !    atm_data_type = ERA5
+      !    atm_data_dir = ${CICE_DATA_root}/forcing/$grid
+
+      integer (kind=int_kind), intent(in) :: &
+           yr         ! current forcing year
+
+      ! local variables
+      character(len=16) :: &
+           grd        ! gx3, gx1, tx1
+
+      character(len=64) :: &
+           atm_data_type_prefix  ! atm_data_type prefix
+
+      integer (kind=int_kind) :: &
+           cnt    , & ! search for files
+           strind     ! string index
+
+      logical :: &
+           exists     ! file existance
+
+      character(len=*), parameter :: subname = '(ERA5_files)'
+
+      if (local_debug .and. my_task == master_task) write(nu_diag,*) subname,'fdbg start'
+
+      ! this could be ERA5 or ERA5_grid, drop the _grid if set
+      atm_data_type_prefix = trim(atm_data_type)
+      strind = index(trim(atm_data_type),'_')
+      if (strind > 0) then
+         atm_data_type_prefix = atm_data_type(1:strind-1)
+      endif
+
+      ! check for grid version using fortran INDEX intrinsic
+      if (index(trim(atm_data_dir),'gx1') > 0) then
+         grd = 'gx1'
+      else if (index(trim(atm_data_dir),'pskrips') > 0) then
+         grd = 'pskrips'
+      else if (index(trim(atm_data_dir),'gx3') > 0) then
+         grd = 'gx3'
+      else if (index(trim(atm_data_dir),'tx1') > 0) then
+         grd = 'tx1'
+      else
+         call abort_ice(error_message=subname//' unknown grid type')
+      endif
+
+      ! cnt represents the possible file format options and steps thru them until one is found
+      exists = .false.
+      cnt = 1
+      do while (.not.exists .and. cnt <= 6)
+
+         if (cnt == 1) uwind_file = trim(atm_data_dir)//'/'//trim(atm_data_type_prefix)//     &
+                                    '/8XDAILY/'//trim(atm_data_type_prefix)//'_'//trim(grd)// &
+                                    '_03hr_forcing'//trim(atm_data_version)//'_2005.nc'
+
+         if (cnt == 2) uwind_file = trim(atm_data_dir)//'/'//trim(atm_data_type_prefix)//                  &
+                                    '/8XDAILY/'//trim(atm_data_type_prefix)//'_03hr_forcing_'//trim(grd)// &
+                                    trim(atm_data_version)//'_2005.nc'
+
+         if (cnt == 3) uwind_file = trim(atm_data_dir)//'/'//trim(atm_data_type_prefix)// &
+                                    '/8XDAILY/'//trim(atm_data_type_prefix)//             &
+                                    '_03hr_forcing'//trim(atm_data_version)//'_2005.nc'
+
+         if (cnt == 4) uwind_file = trim(atm_data_dir)//                                      &
+                                    '/8XDAILY/'//trim(atm_data_type_prefix)//'_'//trim(grd)// &
+                                    '_03hr_forcing'//trim(atm_data_version)//'_2005.nc'
+
+         if (cnt == 5) uwind_file = trim(atm_data_dir)//                                                   &
+                                    '/8XDAILY/'//trim(atm_data_type_prefix)//'_03hr_forcing_'//trim(grd)// &
+                                    trim(atm_data_version)//'_2005.nc'
+
+         if (cnt == 6) uwind_file = trim(atm_data_dir)//                                  &
+                                    '/8XDAILY/'//trim(atm_data_type_prefix)//             &
+                                    '_03hr_forcing'//trim(atm_data_version)//'_2005.nc'
+
+
+         call file_year(uwind_file,yr)
+         INQUIRE(FILE=uwind_file,EXIST=exists)
+
+         if (debug_forcing .and. (my_task == master_task)) then
+            write(nu_diag,*) subname,cnt,exists,trim(uwind_file)
+         endif
+
+         cnt = cnt + 1
+      enddo
+
+      if (.not.exists) then
+         write(nu_diag,*) subname,' atm_data_dir = ',trim(atm_data_dir)
+         write(nu_diag,*) subname,' atm_data_type_prefix = ',trim(atm_data_type_prefix)
+         write(nu_diag,*) subname,' atm_data_version = ',trim(atm_data_version)
+         call abort_ice(error_message=subname//' could not find forcing file')
+      endif
+
+      if (my_task == master_task) then
+         write (nu_diag,'(2a)') ' '
+         write (nu_diag,'(2a)') subname,'Atmospheric data files:'
+         write (nu_diag,'(2a)') subname,trim(uwind_file)
+      endif
+
+    end subroutine ERA5_files
+
+!=======================================================================
+
       subroutine JRA55_data
 
       use ice_blocks, only: block, get_block
@@ -2562,6 +2837,502 @@
       endif                   ! debug_forcing
 
       end subroutine JRA55_data
+
+!=======================================================================
+
+      subroutine ACCESS_data
+
+      use ice_blocks, only: block, get_block
+      use ice_global_reductions, only: global_minval, global_maxval
+      use ice_domain, only: nblocks, distrb_info
+      use ice_flux, only: fsnow, Tair, uatm, vatm, Qa, fsw, flw
+      use ice_grid, only: hm, tmask, umask
+      use ice_state, only: aice
+      use ice_calendar, only: days_per_year
+
+      integer (kind=int_kind) :: &
+          ncid        , & ! netcdf file id
+          i, j, n1    , &
+          lfyear      , & ! local year value
+          recnum      , & ! record number
+          recslot     , & ! record slot in file for current time step
+          dataloc     , & ! location in data arrays for current time step
+          maxrec      , & ! maximum record number
+          iblk            ! block index
+
+      integer (kind=int_kind), save :: &
+          frec_info(2,2) = -99    ! remember prior values to reduce reading
+                                  ! first dim is yr, recnum
+                                  ! second dim is data1 data2
+
+      real (kind=dbl_kind) :: &
+          secday          , & ! number of seconds in day
+          eps, tt         , & ! for interpolation coefficients
+          Tffresh         , &
+          vmin, vmax
+
+      character(len=64) :: fieldname !netcdf field name
+      character (char_len_long) :: uwind_file_old
+      character(len=*), parameter :: subname = '(ACCESS_data)'
+
+      if (local_debug .and. my_task == master_task) write(nu_diag,*) subname,'fdbg start'
+
+      call icepack_query_parameters(Tffresh_out=Tffresh)
+      call icepack_query_parameters(secday_out=secday)
+      call icepack_warnings_flush(nu_diag)
+      if (icepack_warnings_aborted()) call abort_ice(error_message=subname, &
+         file=__FILE__, line=__LINE__)
+
+      maxrec = days_per_year
+      recslot = 2
+      dataloc = 1
+
+      if (local_debug .and. my_task == master_task) then
+         write(nu_diag,*) subname,'fdbg dpy, maxrec = ',days_per_year,maxrec
+      endif
+
+      !-------------------------------------------------------------------
+      ! 3-hourly data
+      ! states are instantaneous, 1st record is 00z Jan 1
+      ! fluxes are 3 hour averages, 1st record is 00z-03z Jan 1
+      ! interpolate states, do not interpolate fluxes
+      !-------------------------------------------------------------------
+      ! File is NETCDF with winds in NORTH and EAST direction
+      ! file variable names are:
+      ! glbrad   (shortwave W/m^2), 3 hr average
+      ! dlwsfc   (longwave W/m^2), 3 hr average
+      ! wndewd   (eastward wind m/s), instantaneous
+      ! wndnwd   (northward wind m/s), instantaneous
+      ! airtmp   (air temperature K), instantaneous
+      ! spchmd   (specific humidity kg/kg), instantaneous
+      ! ttlpcp   (precipitation kg/m s-1), 3 hr average
+      !-------------------------------------------------------------------
+
+      uwind_file_old = uwind_file
+      if (uwind_file /= uwind_file_old .and. my_task == master_task) then
+         write(nu_diag,'(2a)') subname,' reading forcing file = ',trim(uwind_file)
+      endif
+
+      call ice_open_nc(uwind_file,ncid)
+
+      do n1 = 1, 2
+
+         lfyear = fyear
+         call file_year(uwind_file,lfyear)
+         if (n1 == 1) then
+            recnum = int(yday)
+            if (my_task == master_task .and. (recnum <= 2 .or. recnum >= maxrec-1)) then
+               write(nu_diag,'(3a)') subname,' reading forcing file 1st ts = ',trim(uwind_file)
+            endif
+         elseif (n1 == 2) then
+            recnum = int(yday) + 1
+            if (recnum > maxrec) then
+               lfyear = fyear + 1  ! next year
+               if (lfyear > fyear_final) lfyear = fyear_init
+               recnum = 1
+               call file_year(uwind_file,lfyear)
+               if (my_task == master_task) then
+                  write(nu_diag,'(3a)') subname,' reading forcing file 2nd ts = ',trim(uwind_file)
+               endif
+               call ice_close_nc(ncid)
+               call ice_open_nc(uwind_file,ncid)
+            endif
+         endif
+
+         if (local_debug .and. my_task == master_task) then
+            write(nu_diag,*) subname,'fdbg read recnum = ',recnum,n1
+         endif
+
+         ! to reduce reading, check whether it's the same data as last read
+
+         if (lfyear /= frec_info(1,n1) .or. recnum /= frec_info(2,n1)) then
+
+            ! check whether we can copy values from 2 to 1, should be faster than reading
+            ! can only do this from 2 to 1 or 1 to 2 without setting up a temporary
+            ! it's more likely that the values from data2 when time advances are needed in data1
+            ! compare n1=1 year/record with data from last timestep at n1=2
+
+            if (n1 == 1 .and. lfyear == frec_info(1,2) .and. recnum == frec_info(2,2)) then
+                Tair_data(:,:,1,:) =  Tair_data(:,:,2,:)
+                uatm_data(:,:,1,:) =  uatm_data(:,:,2,:)
+                vatm_data(:,:,1,:) =  vatm_data(:,:,2,:)
+                  Qa_data(:,:,1,:) =    Qa_data(:,:,2,:)
+                 fsw_data(:,:,1,:) =   fsw_data(:,:,2,:)
+                 flw_data(:,:,1,:) =   flw_data(:,:,2,:)
+               fsnow_data(:,:,1,:) = fsnow_data(:,:,2,:)
+            else
+
+               fieldname = 'airtmp'
+               call ice_read_nc(ncid,recnum,fieldname,Tair_data(:,:,n1,:),local_debug, &
+                    field_loc=field_loc_center, &
+                    field_type=field_type_scalar)
+
+               fieldname = 'wndewd'
+               call ice_read_nc(ncid,recnum,fieldname,uatm_data(:,:,n1,:),local_debug, &
+                    field_loc=field_loc_center, &
+                    field_type=field_type_scalar)
+
+               fieldname = 'wndnwd'
+               call ice_read_nc(ncid,recnum,fieldname,vatm_data(:,:,n1,:),local_debug, &
+                    field_loc=field_loc_center, &
+                    field_type=field_type_scalar)
+
+               fieldname = 'spchmd'
+               call ice_read_nc(ncid,recnum,fieldname,Qa_data(:,:,n1,:),local_debug, &
+                    field_loc=field_loc_center, &
+                    field_type=field_type_scalar)
+
+               fieldname = 'glbrad'
+               call ice_read_nc(ncid,recnum,fieldname,fsw_data(:,:,n1,:),local_debug, &
+                    field_loc=field_loc_center, &
+                    field_type=field_type_scalar)
+
+               fieldname = 'dlwsfc'
+               call ice_read_nc(ncid,recnum,fieldname,flw_data(:,:,n1,:),local_debug, &
+                    field_loc=field_loc_center, &
+                    field_type=field_type_scalar)
+
+               fieldname = 'ttlpcp'
+               call ice_read_nc(ncid,recnum,fieldname,fsnow_data(:,:,n1,:),local_debug, &
+                    field_loc=field_loc_center, &
+                    field_type=field_type_scalar)
+            endif  ! copy data from n1=2 from last timestep to n1=1
+         endif  ! input data is same as last timestep
+
+         frec_info(1,n1) = lfyear
+         frec_info(2,n1) = recnum
+
+      enddo  ! n1
+
+      call ice_close_nc(ncid)
+
+      ! reset uwind_file to original year
+      call file_year(uwind_file,fyear)
+
+      call interp_coeff(recnum, recslot, secday, dataloc)
+
+      ! if (c2intp < c0 .or. c2intp > c1) then
+      !    write(nu_diag,*) subname,' ERROR: c2intp = ',c2intp
+      !    call abort_ice (error_message=subname//' ERROR: c2intp out of range', &
+      !       file=__FILE__, line=__LINE__)
+      ! endif
+      ! if (local_debug .and. my_task == master_task) then
+      !    write(nu_diag,*) subname,'fdbg c12intp = ',c1intp,c2intp
+      ! endif
+
+      ! Interpolate
+      call interpolate_data (Tair_data, Tair)
+      call interpolate_data (uatm_data, uatm)
+      call interpolate_data (vatm_data, vatm)
+      call interpolate_data (Qa_data, Qa)
+      ! use 3 hr average for heat flux and precip fields, no interpolation
+!      call interpolate_data (fsw_data, fsw)
+!      call interpolate_data (flw_data, flw)
+!      call interpolate_data (fsnow_data, fsnow)
+      fsw(:,:,:) = fsw_data(:,:,1,:)
+      flw(:,:,:) = flw_data(:,:,1,:)
+      fsnow(:,:,:) = fsnow_data(:,:,1,:)
+
+      !$OMP PARALLEL DO PRIVATE(iblk,i,j)
+      do iblk = 1, nblocks
+        ! limit summer Tair values where ice is present
+        do j = 1, ny_block
+          do i = 1, nx_block
+            if (aice(i,j,iblk) > p1) Tair(i,j,iblk) = min(Tair(i,j,iblk), Tffresh+p1)
+          enddo
+        enddo
+
+        do j = 1, ny_block
+          do i = 1, nx_block
+            Qa  (i,j,iblk) = Qa  (i,j,iblk) * hm(i,j,iblk)
+            Tair(i,j,iblk) = Tair(i,j,iblk) * hm(i,j,iblk)
+            uatm(i,j,iblk) = uatm(i,j,iblk) * hm(i,j,iblk)
+            vatm(i,j,iblk) = vatm(i,j,iblk) * hm(i,j,iblk)
+            fsw (i,j,iblk) = fsw (i,j,iblk) * hm(i,j,iblk)
+            flw (i,j,iblk) = flw (i,j,iblk) * hm(i,j,iblk)
+            fsnow(i,j,iblk) = fsnow (i,j,iblk) * hm(i,j,iblk)
+          enddo
+        enddo
+
+      enddo  ! iblk
+      !$OMP END PARALLEL DO
+
+      if (debug_forcing .or. local_debug) then
+         if (my_task.eq.master_task) write (nu_diag,*) subname,'fdbg JRA55_bulk_data'
+         vmin = global_minval(fsw,distrb_info,tmask)
+         vmax = global_maxval(fsw,distrb_info,tmask)
+         if (my_task.eq.master_task) write (nu_diag,*) subname,'fdbg fsw',vmin,vmax
+         vmin = global_minval(flw,distrb_info,tmask)
+         vmax = global_maxval(flw,distrb_info,tmask)
+         if (my_task.eq.master_task) write (nu_diag,*) subname,'fdbg flw',vmin,vmax
+         vmin =global_minval(fsnow,distrb_info,tmask)
+         vmax =global_maxval(fsnow,distrb_info,tmask)
+         if (my_task.eq.master_task) write (nu_diag,*) subname,'fdbg fsnow',vmin,vmax
+         vmin = global_minval(Tair,distrb_info,tmask)
+         vmax = global_maxval(Tair,distrb_info,tmask)
+         if (my_task.eq.master_task) write (nu_diag,*) subname,'fdbg Tair',vmin,vmax
+         vmin = global_minval(uatm,distrb_info,umask)
+         vmax = global_maxval(uatm,distrb_info,umask)
+         if (my_task.eq.master_task) write (nu_diag,*) subname,'fdbg uatm',vmin,vmax
+         vmin = global_minval(vatm,distrb_info,umask)
+         vmax = global_maxval(vatm,distrb_info,umask)
+         if (my_task.eq.master_task) write (nu_diag,*) subname,'fdbg vatm',vmin,vmax
+         vmin = global_minval(Qa,distrb_info,tmask)
+         vmax = global_maxval(Qa,distrb_info,tmask)
+         if (my_task.eq.master_task) write (nu_diag,*) subname,'fdbg Qa',vmin,vmax
+      endif                   ! debug_forcing
+
+      end subroutine ACCESS_data
+
+
+!=======================================================================
+
+      subroutine ERA5_data
+
+      use ice_blocks, only: block, get_block
+      use ice_global_reductions, only: global_minval, global_maxval
+      use ice_domain, only: nblocks, distrb_info
+      use ice_flux, only: fsnow, Tair, uatm, vatm, Qa, fsw, flw
+      use ice_grid, only: hm, tmask, umask
+      use ice_state, only: aice
+      use ice_calendar, only: days_per_year
+
+      integer (kind=int_kind) :: &
+          ncid        , & ! netcdf file id
+          i, j, n1    , &
+          lfyear      , & ! local year value
+          recnum      , & ! record number
+          maxrec      , & ! maximum record number
+          iblk            ! block index
+
+      integer (kind=int_kind), save :: &
+          frec_info(2,2) = -99    ! remember prior values to reduce reading
+                                  ! first dim is yr, recnum
+                                  ! second dim is data1 data2
+
+      real (kind=dbl_kind) :: &
+          sec3hr          , & ! number of seconds in 3 hours
+          secday          , & ! number of seconds in day
+          eps, tt         , & ! for interpolation coefficients
+          Tffresh         , &
+          vmin, vmax
+
+      character(len=64) :: fieldname !netcdf field name
+      character (char_len_long) :: uwind_file_old
+      character(len=*), parameter :: subname = '(ERA5_data)'
+
+      if (local_debug .and. my_task == master_task) write(nu_diag,*) subname,'fdbg start'
+
+      call icepack_query_parameters(Tffresh_out=Tffresh)
+      call icepack_query_parameters(secday_out=secday)
+      call icepack_warnings_flush(nu_diag)
+      if (icepack_warnings_aborted()) call abort_ice(error_message=subname, &
+         file=__FILE__, line=__LINE__)
+
+      sec3hr = secday/c8        ! seconds in 3 hours
+      maxrec = days_per_year * 8
+
+      if (local_debug .and. my_task == master_task) then
+         write(nu_diag,*) subname,'fdbg dpy, maxrec = ',days_per_year,maxrec
+      endif
+
+      !-------------------------------------------------------------------
+      ! 3-hourly data
+      ! states are instantaneous, 1st record is 00z Jan 1
+      ! fluxes are 3 hour averages, 1st record is 00z-03z Jan 1
+      ! interpolate states, do not interpolate fluxes
+      !-------------------------------------------------------------------
+      ! File is NETCDF with winds in NORTH and EAST direction
+      ! file variable names are:
+      ! glbrad   (shortwave W/m^2), 3 hr average
+      ! dlwsfc   (longwave W/m^2), 3 hr average
+      ! wndewd   (eastward wind m/s), instantaneous
+      ! wndnwd   (northward wind m/s), instantaneous
+      ! airtmp   (air temperature K), instantaneous
+      ! spchmd   (specific humidity kg/kg), instantaneous
+      ! ttlpcp   (precipitation kg/m s-1), 3 hr average
+      !-------------------------------------------------------------------
+
+      uwind_file_old = uwind_file
+      if (uwind_file /= uwind_file_old .and. my_task == master_task) then
+         write(nu_diag,'(2a)') subname,' reading forcing file = ',trim(uwind_file)
+      endif
+
+      call ice_open_nc(uwind_file,ncid)
+
+      do n1 = 1, 2
+
+         lfyear = fyear
+         call file_year(uwind_file,lfyear)
+         if (n1 == 1) then
+            recnum = 8*int(yday) - 7 + int(real(msec,kind=dbl_kind)/sec3hr)
+            if (my_task == master_task .and. (recnum <= 2 .or. recnum >= maxrec-1)) then
+               write(nu_diag,'(3a)') subname,' reading forcing file 1st ts = ',trim(uwind_file)
+            endif
+         elseif (n1 == 2) then
+            recnum = 8*int(yday) - 7 + int(real(msec,kind=dbl_kind)/sec3hr) + 1
+            if (recnum > maxrec) then
+               lfyear = fyear + 1  ! next year
+               if (lfyear > fyear_final) lfyear = fyear_init
+               recnum = 1
+               call file_year(uwind_file,lfyear)
+               if (my_task == master_task) then
+                  write(nu_diag,'(3a)') subname,' reading forcing file 2nd ts = ',trim(uwind_file)
+               endif
+               call ice_close_nc(ncid)
+               call ice_open_nc(uwind_file,ncid)
+            endif
+         endif
+
+         if (local_debug .and. my_task == master_task) then
+            write(nu_diag,*) subname,'fdbg read recnum = ',recnum,n1
+         endif
+
+         ! to reduce reading, check whether it's the same data as last read
+
+         if (lfyear /= frec_info(1,n1) .or. recnum /= frec_info(2,n1)) then
+
+            ! check whether we can copy values from 2 to 1, should be faster than reading
+            ! can only do this from 2 to 1 or 1 to 2 without setting up a temporary
+            ! it's more likely that the values from data2 when time advances are needed in data1
+            ! compare n1=1 year/record with data from last timestep at n1=2
+
+            if (n1 == 1 .and. lfyear == frec_info(1,2) .and. recnum == frec_info(2,2)) then
+                Tair_data(:,:,1,:) =  Tair_data(:,:,2,:)
+                uatm_data(:,:,1,:) =  uatm_data(:,:,2,:)
+                vatm_data(:,:,1,:) =  vatm_data(:,:,2,:)
+                  Qa_data(:,:,1,:) =    Qa_data(:,:,2,:)
+                 fsw_data(:,:,1,:) =   fsw_data(:,:,2,:)
+                 flw_data(:,:,1,:) =   flw_data(:,:,2,:)
+               fsnow_data(:,:,1,:) = fsnow_data(:,:,2,:)
+            else
+
+               fieldname = 'airtmp'
+               call ice_read_nc(ncid,recnum,fieldname,Tair_data(:,:,n1,:),local_debug, &
+                    field_loc=field_loc_center, &
+                    field_type=field_type_scalar)
+
+               fieldname = 'wndewd'
+               call ice_read_nc(ncid,recnum,fieldname,uatm_data(:,:,n1,:),local_debug, &
+                    field_loc=field_loc_center, &
+                    field_type=field_type_scalar)
+
+               fieldname = 'wndnwd'
+               call ice_read_nc(ncid,recnum,fieldname,vatm_data(:,:,n1,:),local_debug, &
+                    field_loc=field_loc_center, &
+                    field_type=field_type_scalar)
+
+               fieldname = 'spchmd'
+               call ice_read_nc(ncid,recnum,fieldname,Qa_data(:,:,n1,:),local_debug, &
+                    field_loc=field_loc_center, &
+                    field_type=field_type_scalar)
+
+               fieldname = 'glbrad'
+               call ice_read_nc(ncid,recnum,fieldname,fsw_data(:,:,n1,:),local_debug, &
+                    field_loc=field_loc_center, &
+                    field_type=field_type_scalar)
+
+               fieldname = 'dlwsfc'
+               call ice_read_nc(ncid,recnum,fieldname,flw_data(:,:,n1,:),local_debug, &
+                    field_loc=field_loc_center, &
+                    field_type=field_type_scalar)
+
+               fieldname = 'ttlpcp'
+               call ice_read_nc(ncid,recnum,fieldname,fsnow_data(:,:,n1,:),local_debug, &
+                    field_loc=field_loc_center, &
+                    field_type=field_type_scalar)
+            endif  ! copy data from n1=2 from last timestep to n1=1
+         endif  ! input data is same as last timestep
+
+         frec_info(1,n1) = lfyear
+         frec_info(2,n1) = recnum
+
+      enddo  ! n1
+
+      call ice_close_nc(ncid)
+
+      ! reset uwind_file to original year
+      call file_year(uwind_file,fyear)
+
+      ! Compute interpolation coefficients
+      eps = 1.0e-6
+      tt = real(mod(msec,nint(sec3hr)),kind=dbl_kind)
+      c2intp = tt / sec3hr
+      if (c2intp < c0 .and. c2intp > c0-eps) c2intp = c0
+      if (c2intp > c1 .and. c2intp < c1+eps) c2intp = c1
+      c1intp = 1.0_dbl_kind - c2intp
+      if (c2intp < c0 .or. c2intp > c1) then
+         write(nu_diag,*) subname,' ERROR: c2intp = ',c2intp
+         call abort_ice (error_message=subname//' ERROR: c2intp out of range', &
+            file=__FILE__, line=__LINE__)
+      endif
+      if (local_debug .and. my_task == master_task) then
+         write(nu_diag,*) subname,'fdbg c12intp = ',c1intp,c2intp
+      endif
+
+      ! Interpolate
+      call interpolate_data (Tair_data, Tair)
+      call interpolate_data (uatm_data, uatm)
+      call interpolate_data (vatm_data, vatm)
+      call interpolate_data (Qa_data, Qa)
+      ! use 3 hr average for heat flux and precip fields, no interpolation
+!      call interpolate_data (fsw_data, fsw)
+!      call interpolate_data (flw_data, flw)
+!      call interpolate_data (fsnow_data, fsnow)
+      fsw(:,:,:) = fsw_data(:,:,1,:)
+      flw(:,:,:) = flw_data(:,:,1,:)
+      fsnow(:,:,:) = fsnow_data(:,:,1,:)
+
+      !$OMP PARALLEL DO PRIVATE(iblk,i,j)
+      do iblk = 1, nblocks
+        ! limit summer Tair values where ice is present
+        do j = 1, ny_block
+          do i = 1, nx_block
+            if (aice(i,j,iblk) > p1) Tair(i,j,iblk) = min(Tair(i,j,iblk), Tffresh+p1)
+          enddo
+        enddo
+
+        do j = 1, ny_block
+          do i = 1, nx_block
+            Qa  (i,j,iblk) = Qa  (i,j,iblk) * hm(i,j,iblk)
+            Tair(i,j,iblk) = Tair(i,j,iblk) * hm(i,j,iblk)
+            uatm(i,j,iblk) = uatm(i,j,iblk) * hm(i,j,iblk)
+            vatm(i,j,iblk) = vatm(i,j,iblk) * hm(i,j,iblk)
+            fsw (i,j,iblk) = fsw (i,j,iblk) * hm(i,j,iblk)
+            flw (i,j,iblk) = flw (i,j,iblk) * hm(i,j,iblk)
+            fsnow(i,j,iblk) = fsnow (i,j,iblk) * hm(i,j,iblk)
+          enddo
+        enddo
+
+      enddo  ! iblk
+      !$OMP END PARALLEL DO
+
+      if (debug_forcing .or. local_debug) then
+         if (my_task.eq.master_task) write (nu_diag,*) subname,'fdbg JRA55_bulk_data'
+         vmin = global_minval(fsw,distrb_info,tmask)
+         vmax = global_maxval(fsw,distrb_info,tmask)
+         if (my_task.eq.master_task) write (nu_diag,*) subname,'fdbg fsw',vmin,vmax
+         vmin = global_minval(flw,distrb_info,tmask)
+         vmax = global_maxval(flw,distrb_info,tmask)
+         if (my_task.eq.master_task) write (nu_diag,*) subname,'fdbg flw',vmin,vmax
+         vmin =global_minval(fsnow,distrb_info,tmask)
+         vmax =global_maxval(fsnow,distrb_info,tmask)
+         if (my_task.eq.master_task) write (nu_diag,*) subname,'fdbg fsnow',vmin,vmax
+         vmin = global_minval(Tair,distrb_info,tmask)
+         vmax = global_maxval(Tair,distrb_info,tmask)
+         if (my_task.eq.master_task) write (nu_diag,*) subname,'fdbg Tair',vmin,vmax
+         vmin = global_minval(uatm,distrb_info,umask)
+         vmax = global_maxval(uatm,distrb_info,umask)
+         if (my_task.eq.master_task) write (nu_diag,*) subname,'fdbg uatm',vmin,vmax
+         vmin = global_minval(vatm,distrb_info,umask)
+         vmax = global_maxval(vatm,distrb_info,umask)
+         if (my_task.eq.master_task) write (nu_diag,*) subname,'fdbg vatm',vmin,vmax
+         vmin = global_minval(Qa,distrb_info,tmask)
+         vmax = global_maxval(Qa,distrb_info,tmask)
+         if (my_task.eq.master_task) write (nu_diag,*) subname,'fdbg Qa',vmin,vmax
+      endif                   ! debug_forcing
+
+      end subroutine ERA5_data
 
 !=======================================================================
 !
@@ -3803,6 +4574,326 @@
 
       end subroutine ocn_data_ncar_init
 
+
+!=======================================================================
+! ACCESS-ESM  ocean forcing
+!=======================================================================
+
+      subroutine ocn_data_access_init
+
+! Reads ACCESS-ESM ocean forcing data set 'pop_frc_gx1v3_010815.nc'
+!
+! List of ocean forcing fields: Note that order is important!
+! (order is determined by field list in vname).
+!
+! For ocean mixed layer-----------------------------units
+!
+! 1  sst------temperature---------------------------(C)
+! 2  sss------salinity------------------------------(ppt)
+! 3  hbl------depth---------------------------------(m)
+! 4  u--------surface u current---------------------(m/s)
+! 5  v--------surface v current---------------------(m/s)
+! 8  qdp------ocean sub-mixed layer heat flux-------(W/m2)
+!
+! Fields 4, 5, 6, 7 are on the U-grid; 1, 2, 3, and 8 are
+! on the T-grid.
+
+! authors: Bruce Briegleb, NCAR
+!          Elizabeth Hunke, LANL
+
+      use ice_blocks, only: nx_block, ny_block
+      use ice_domain_size, only: max_blocks
+#ifdef USE_NETCDF
+      use netcdf
+#endif
+
+      integer (kind=int_kind) :: &
+        n   , & ! field index
+        m   , & ! month index
+        nrec, & ! record number for direct access
+        nbits
+
+      character(char_len) :: &
+        vname(nfld) ! variable names to search for in file
+      data vname /  &
+           'T',      'S',      'hblt',  'U',     'V',   'qdp' /
+
+      integer (kind=int_kind) :: &
+        status  , & ! status flag
+        fid     , & ! file id
+        dimid   , & ! dimension id
+        nlat    , & ! number of longitudes of data
+        nlon        ! number of latitudes  of data
+
+      real (kind=dbl_kind), dimension (nx_block,ny_block,max_blocks) :: &
+         work1
+
+      character(len=*), parameter :: subname = '(ocn_data_access_init)'
+
+      if (local_debug .and. my_task == master_task) write(nu_diag,*) subname,'fdbg start'
+
+      if (my_task == master_task) then
+
+         write (nu_diag,*) 'WARNING: evp_prep calculates surface tilt'
+         write (nu_diag,*) 'WARNING: stress from geostrophic currents,'
+         write (nu_diag,*) 'WARNING: not data from ocean forcing file.'
+         write (nu_diag,*) 'WARNING: Alter ice_dyn_evp.F90 if desired.'
+
+         if (restore_ocn) write (nu_diag,*)  &
+             'SST restoring timescale = ',trestore,' days'
+
+         sst_file = trim(ocn_data_dir)//'/'//trim(oceanmixed_file) ! not just sst
+
+        !---------------------------------------------------------------
+        ! Read in ocean forcing data from an existing file
+        !---------------------------------------------------------------
+        write (nu_diag,*) 'ocean mixed layer forcing data file = ', &
+                           trim(sst_file)
+
+      endif ! master_task
+
+      if (trim(ocn_data_format) == 'nc') then
+#ifdef USE_NETCDF
+        if (my_task == master_task) then
+          call ice_open_nc(sst_file, fid)
+
+!          status = nf90_inq_dimid(fid,'nlon',dimid)
+          status = nf90_inq_dimid(fid,'ni',dimid)
+          call ice_check_nc(status, subname//' ERROR: inq dimid ni', file=__FILE__, line=__LINE__)
+          status = nf90_inquire_dimension(fid,dimid,len=nlon)
+          call ice_check_nc(status, subname//' ERROR: inq dim ni', file=__FILE__, line=__LINE__)
+
+!          status = nf90_inq_dimid(fid,'nlat',dimid)
+          status = nf90_inq_dimid(fid,'nj',dimid)
+          call ice_check_nc(status, subname//' ERROR: inq dimid nj', file=__FILE__, line=__LINE__)
+          status = nf90_inquire_dimension(fid,dimid,len=nlat)
+          call ice_check_nc(status, subname//' ERROR: inq dim nj', file=__FILE__, line=__LINE__)
+
+          if( nlon .ne. nx_global ) then
+            call abort_ice (error_message=subname//'ice: ocn frc file nlon ne nx_global', &
+               file=__FILE__, line=__LINE__)
+          endif
+          if( nlat .ne. ny_global ) then
+            call abort_ice (error_message=subname//'ice: ocn frc file nlat ne ny_global', &
+               file=__FILE__, line=__LINE__)
+          endif
+
+        endif ! master_task
+
+        ! Read in ocean forcing data for all 12 months
+        do n=1,nfld
+          do m=1,12
+
+            ! Note: netCDF does single to double conversion if necessary
+!           if (n >= 4 .and. n <= 7) then
+!              call ice_read_nc(fid, m, vname(n), work1, debug_forcing, &
+!                               field_loc_NEcorner, field_type_vector)
+!           else
+               call ice_read_nc(fid, m, vname(n), work1, debug_forcing, &
+                                field_loc_center, field_type_scalar)
+!           endif
+
+            ocn_frc_m(:,:,:,n,m) = work1(:,:,:)
+
+          enddo               ! month loop
+        enddo               ! field loop
+
+        if (my_task == master_task) call ice_close_nc(fid)
+#else
+      call abort_ice(subname//'ERROR: USE_NETCDF cpp not defined for '//trim(sst_file), &
+          file=__FILE__, line=__LINE__)
+#endif
+
+      else  ! binary format
+
+        nbits = 64
+        call ice_open (nu_forcing, sst_file, nbits)
+
+        nrec = 0
+        do n=1,nfld
+           do m=1,12
+              nrec = nrec + 1
+              if (n >= 4 .and. n <= 7) then
+                call ice_read (nu_forcing, nrec, work1, 'rda8', debug_forcing, &
+                               field_loc_NEcorner, field_type_vector)
+              else
+                call ice_read (nu_forcing, nrec, work1, 'rda8', debug_forcing, &
+                               field_loc_center, field_type_scalar)
+              endif
+              ocn_frc_m(:,:,:,n,m) = work1(:,:,:)
+           enddo               ! month loop
+        enddo               ! field loop
+        close (nu_forcing)
+
+      endif
+
+!echmod - currents cause Fram outflow to be too large
+!             ocn_frc_m(:,:,:,4,:) = c0
+!             ocn_frc_m(:,:,:,5,:) = c0
+!echmod
+
+      end subroutine ocn_data_access_init
+
+
+!=======================================================================
+! ECCOv5  ocean forcing
+!=======================================================================
+
+      subroutine ocn_data_ecco_init
+
+! Reads ECCOv5 ocean forcing data set 'pop_frc_gx1v3_010815.nc'
+!
+! List of ocean forcing fields: Note that order is important!
+! (order is determined by field list in vname).
+!
+! For ocean mixed layer-----------------------------units
+!
+! 1  sst------temperature---------------------------(C)
+! 2  sss------salinity------------------------------(ppt)
+! 3  hbl------depth---------------------------------(m)
+! 4  u--------surface u current---------------------(m/s)
+! 5  v--------surface v current---------------------(m/s)
+! 8  qdp------ocean sub-mixed layer heat flux-------(W/m2)
+!
+! Fields 4, 5, 6, 7 are on the U-grid; 1, 2, 3, and 8 are
+! on the T-grid.
+
+! authors: Bruce Briegleb, NCAR
+!          Elizabeth Hunke, LANL
+
+      use ice_blocks, only: nx_block, ny_block
+      use ice_domain_size, only: max_blocks
+#ifdef USE_NETCDF
+      use netcdf
+#endif
+
+      integer (kind=int_kind) :: &
+        n   , & ! field index
+        m   , & ! month index
+        nrec, & ! record number for direct access
+        nbits
+
+      character(char_len) :: &
+        vname(6) ! variable names to search for in file
+      data vname /  &
+           'T',      'S',      'hblt',  'U',     'V',  'qdp' /
+
+      integer (kind=int_kind) :: &
+        status  , & ! status flag
+        fid     , & ! file id
+        dimid   , & ! dimension id
+        nlat    , & ! number of longitudes of data
+        nlon        ! number of latitudes  of data
+
+      real (kind=dbl_kind), dimension (nx_block,ny_block,max_blocks) :: &
+         work1
+
+      character(len=*), parameter :: subname = '(ocn_data_ecco_init)'
+
+      if (local_debug .and. my_task == master_task) write(nu_diag,*) subname,'fdbg start'
+
+      if (my_task == master_task) then
+
+         write (nu_diag,*) 'WARNING: evp_prep calculates surface tilt'
+         write (nu_diag,*) 'WARNING: stress from geostrophic currents,'
+         write (nu_diag,*) 'WARNING: not data from ocean forcing file.'
+         write (nu_diag,*) 'WARNING: Alter ice_dyn_evp.F90 if desired.'
+
+         if (restore_ocn) write (nu_diag,*)  &
+             'SST restoring timescale = ',trestore,' days'
+
+         sst_file = trim(ocn_data_dir)//'/'//trim(oceanmixed_file) ! not just sst
+
+        !---------------------------------------------------------------
+        ! Read in ocean forcing data from an existing file
+        !---------------------------------------------------------------
+        write (nu_diag,*) 'ocean mixed layer forcing data file = ', &
+                           trim(sst_file)
+
+      endif ! master_task
+
+      if (trim(ocn_data_format) == 'nc') then
+#ifdef USE_NETCDF
+        if (my_task == master_task) then
+          call ice_open_nc(sst_file, fid)
+
+!          status = nf90_inq_dimid(fid,'nlon',dimid)
+          status = nf90_inq_dimid(fid,'ni',dimid)
+          call ice_check_nc(status, subname//' ERROR: inq dimid ni', file=__FILE__, line=__LINE__)
+          status = nf90_inquire_dimension(fid,dimid,len=nlon)
+          call ice_check_nc(status, subname//' ERROR: inq dim ni', file=__FILE__, line=__LINE__)
+
+!          status = nf90_inq_dimid(fid,'nlat',dimid)
+          status = nf90_inq_dimid(fid,'nj',dimid)
+          call ice_check_nc(status, subname//' ERROR: inq dimid nj', file=__FILE__, line=__LINE__)
+          status = nf90_inquire_dimension(fid,dimid,len=nlat)
+          call ice_check_nc(status, subname//' ERROR: inq dim nj', file=__FILE__, line=__LINE__)
+
+          if( nlon .ne. nx_global ) then
+            call abort_ice (error_message=subname//'ice: ocn frc file nlon ne nx_global', &
+               file=__FILE__, line=__LINE__)
+          endif
+          if( nlat .ne. ny_global ) then
+            call abort_ice (error_message=subname//'ice: ocn frc file nlat ne ny_global', &
+               file=__FILE__, line=__LINE__)
+          endif
+
+        endif ! master_task
+
+        ! Read in ocean forcing data for all 12 months
+        do n=1,6
+          do m=1,12
+
+            ! Note: netCDF does single to double conversion if necessary
+!           if (n >= 4 .and. n <= 7) then
+!              call ice_read_nc(fid, m, vname(n), work1, debug_forcing, &
+!                               field_loc_NEcorner, field_type_vector)
+!           else
+               call ice_read_nc(fid, m, vname(n), work1, debug_forcing, &
+                                field_loc_center, field_type_scalar)
+!           endif
+
+            ocn_frc_m(:,:,:,n,m) = work1(:,:,:)
+
+          enddo               ! month loop
+        enddo               ! field loop
+
+        if (my_task == master_task) call ice_close_nc(fid)
+#else
+      call abort_ice(subname//'ERROR: USE_NETCDF cpp not defined for '//trim(sst_file), &
+          file=__FILE__, line=__LINE__)
+#endif
+
+      else  ! binary format
+
+        nbits = 64
+        call ice_open (nu_forcing, sst_file, nbits)
+
+        nrec = 0
+        do n=1,6
+           do m=1,12
+              nrec = nrec + 1
+              if (n >= 4 .and. n <= 7) then
+                call ice_read (nu_forcing, nrec, work1, 'rda8', debug_forcing, &
+                               field_loc_NEcorner, field_type_vector)
+              else
+                call ice_read (nu_forcing, nrec, work1, 'rda8', debug_forcing, &
+                               field_loc_center, field_type_scalar)
+              endif
+              ocn_frc_m(:,:,:,n,m) = work1(:,:,:)
+           enddo               ! month loop
+        enddo               ! field loop
+        close (nu_forcing)
+
+      endif
+
+!echmod - currents cause Fram outflow to be too large
+!             ocn_frc_m(:,:,:,4,:) = c0
+!             ocn_frc_m(:,:,:,5,:) = c0
+!echmod
+
+      end subroutine ocn_data_ecco_init
+
 !=======================================================================
 
       subroutine ocn_data_ncar_init_3D
@@ -4153,6 +5244,348 @@
       endif
 
       end subroutine ocn_data_ncar
+
+
+!=======================================================================
+
+      subroutine ocn_data_ecco(dt)
+
+! Interpolate monthly ocean data to timestep.
+! Restore sst if desired. sst is updated with surface fluxes in ice_ocean.F.
+
+      use ice_blocks, only: nx_block, ny_block
+      use ice_global_reductions, only: global_minval, global_maxval
+      use ice_domain, only: nblocks, distrb_info
+      use ice_domain_size, only: max_blocks
+      use ice_flux, only: sss, sst, Tf, uocn, vocn, &
+            qdp, hmix
+      use ice_restart_shared, only: restart
+      use ice_grid, only: hm, tmask, umask
+
+      real (kind=dbl_kind), intent(in) :: &
+         dt      ! time step
+
+      integer (kind=int_kind) :: &
+          i, j, n, iblk   , &
+          ixm,ixp         , & ! record numbers for neighboring months
+          maxrec          , & ! maximum record number
+          recslot         , & ! spline slot for current record
+          midmonth            ! middle day of month
+
+      real (kind=dbl_kind) :: &
+          vmin, vmax
+
+      real (kind=dbl_kind), dimension (nx_block,ny_block,max_blocks) :: &
+         work1
+
+      character(len=*), parameter :: subname = '(ocn_data_ecco)'
+
+      if (local_debug .and. my_task == master_task) write(nu_diag,*) subname,'fdbg start'
+
+    !-------------------------------------------------------------------
+    ! monthly data
+    !
+    ! Assume that monthly data values are located in the middle of the
+    ! month.
+    !-------------------------------------------------------------------
+
+      midmonth = 15  ! data is given on 15th of every month
+!      midmonth = fix(p5 * real(daymo(mmonth),kind=dbl_kind))  ! exact middle
+
+      ! Compute record numbers for surrounding months
+      maxrec = 12
+      ixm  = mod(mmonth+maxrec-2,maxrec) + 1
+      ixp  = mod(mmonth,         maxrec) + 1
+      if (mday >= midmonth) ixm = -99  ! other two points will be used
+      if (mday <  midmonth) ixp = -99
+
+      ! Determine whether interpolation will use values 1:2 or 2:3
+      ! recslot = 2 means we use values 1:2, with the current value (2)
+      !  in the second slot
+      ! recslot = 1 means we use values 2:3, with the current value (2)
+      !  in the first slot
+      recslot = 1                             ! latter half of month
+      if (mday < midmonth) recslot = 2        ! first half of month
+
+      ! Find interpolation coefficients
+      call interp_coeff_monthly (recslot)
+
+      sst_data(:,:,:,:) = c0
+      do n = 6, 1, -1
+        do iblk = 1, nblocks
+        ! use sst_data arrays as temporary work space until n=1
+        if (ixm /= -99) then  ! first half of month
+          sst_data(:,:,1,iblk) = ocn_frc_m(:,:,iblk,n,ixm)
+          sst_data(:,:,2,iblk) = ocn_frc_m(:,:,iblk,n,mmonth)
+        else                 ! second half of month
+          sst_data(:,:,1,iblk) = ocn_frc_m(:,:,iblk,n,mmonth)
+          sst_data(:,:,2,iblk) = ocn_frc_m(:,:,iblk,n,ixp)
+        endif
+        enddo
+
+        call interpolate_data (sst_data,work1)
+        ! masking by hm is necessary due to NaNs in the data file
+        do j = 1, ny_block
+          do i = 1, nx_block
+            if (n == 2) sss    (i,j,:) = c0
+            if (n == 3) hmix   (i,j,:) = c0
+            if (n == 4) uocn   (i,j,:) = c0
+            if (n == 5) vocn   (i,j,:) = c0
+            if (n == 6) qdp    (i,j,:) = c0
+            do iblk = 1, nblocks
+              if (hm(i,j,iblk) == c1) then
+                if (n == 2) sss    (i,j,iblk) = work1(i,j,iblk)
+                if (n == 3) hmix   (i,j,iblk) = max(mixed_layer_depth_default,work1(i,j,iblk))
+                if (n == 4) uocn   (i,j,iblk) = work1(i,j,iblk)
+                if (n == 5) vocn   (i,j,iblk) = work1(i,j,iblk)
+                if (n == 6) qdp    (i,j,iblk) = work1(i,j,iblk)
+              endif
+            enddo
+          enddo
+        enddo
+      enddo
+
+      do j = 1, ny_block
+         do i = 1, nx_block
+            sss (i,j,:) = max (sss(i,j,:), c0)
+            hmix(i,j,:) = max(hmix(i,j,:), c0)
+         enddo
+      enddo
+
+      call ocn_freezing_temperature
+
+      if (restore_ocn) then
+        do j = 1, ny_block
+         do i = 1, nx_block
+           sst(i,j,:) = sst(i,j,:) + (work1(i,j,:)-sst(i,j,:))*dt/trest
+         enddo
+        enddo
+!     else sst is only updated in ice_ocean.F
+      endif
+
+      ! initialize sst properly on first step
+      if (istep1 <= 1 .and. .not. (restart)) then
+        call interpolate_data (sst_data,sst)
+        !$OMP PARALLEL DO PRIVATE(iblk,i,j)
+        do iblk = 1, nblocks
+         do j = 1, ny_block
+          do i = 1, nx_block
+            if (hm(i,j,iblk) == c1) then
+              sst(i,j,iblk) =  max (sst(i,j,iblk), Tf(i,j,iblk))
+            else
+              sst(i,j,iblk) = c0
+            endif
+          enddo
+         enddo
+        enddo
+        !$OMP END PARALLEL DO
+      endif
+
+      if (debug_forcing) then
+         if (my_task == master_task)  &
+               write (nu_diag,*) 'ocn_data_ecco'
+           vmin = global_minval(Tf,distrb_info,tmask)
+           vmax = global_maxval(Tf,distrb_info,tmask)
+           if (my_task.eq.master_task)  &
+               write (nu_diag,*) 'Tf',vmin,vmax
+           vmin = global_minval(sst,distrb_info,tmask)
+           vmax = global_maxval(sst,distrb_info,tmask)
+           if (my_task.eq.master_task)  &
+               write (nu_diag,*) 'sst',vmin,vmax
+           vmin = global_minval(sss,distrb_info,tmask)
+           vmax = global_maxval(sss,distrb_info,tmask)
+           if (my_task.eq.master_task)  &
+               write (nu_diag,*) 'sss',vmin,vmax
+           vmin = global_minval(hmix,distrb_info,tmask)
+           vmax = global_maxval(hmix,distrb_info,tmask)
+           if (my_task.eq.master_task)  &
+               write (nu_diag,*) 'hmix',vmin,vmax
+           vmin = global_minval(uocn,distrb_info,umask)
+           vmax = global_maxval(uocn,distrb_info,umask)
+           if (my_task.eq.master_task)  &
+               write (nu_diag,*) 'uocn',vmin,vmax
+           vmin = global_minval(vocn,distrb_info,umask)
+           vmax = global_maxval(vocn,distrb_info,umask)
+           if (my_task.eq.master_task)  &
+               write (nu_diag,*) 'vocn',vmin,vmax
+           vmin = global_minval(qdp,distrb_info,tmask)
+           vmax = global_maxval(qdp,distrb_info,tmask)
+           if (my_task.eq.master_task)  &
+               write (nu_diag,*) 'qdp',vmin,vmax
+      endif
+
+      end subroutine ocn_data_ecco
+
+
+!=======================================================================
+
+      subroutine ocn_data_access(dt)
+
+! Interpolate monthly ocean data to timestep.
+! Restore sst if desired. sst is updated with surface fluxes in ice_ocean.F.
+
+      use ice_blocks, only: nx_block, ny_block
+      use ice_global_reductions, only: global_minval, global_maxval
+      use ice_domain, only: nblocks, distrb_info
+      use ice_domain_size, only: max_blocks
+      use ice_flux, only: sss, sst, Tf, uocn, vocn, ss_tltx, ss_tlty, &
+            qdp, hmix
+      use ice_restart_shared, only: restart
+      use ice_grid, only: hm, tmask, umask
+
+      real (kind=dbl_kind), intent(in) :: &
+         dt      ! time step
+
+      integer (kind=int_kind) :: &
+          i, j, n, iblk   , &
+          ixm,ixp         , & ! record numbers for neighboring months
+          maxrec          , & ! maximum record number
+          recslot         , & ! spline slot for current record
+          midmonth            ! middle day of month
+
+      real (kind=dbl_kind) :: &
+          vmin, vmax
+
+      real (kind=dbl_kind), dimension (nx_block,ny_block,max_blocks) :: &
+         work1
+
+      character(len=*), parameter :: subname = '(ocn_data_access)'
+
+      if (local_debug .and. my_task == master_task) write(nu_diag,*) subname,'fdbg start'
+
+    !-------------------------------------------------------------------
+    ! monthly data
+    !
+    ! Assume that monthly data values are located in the middle of the
+    ! month.
+    !-------------------------------------------------------------------
+
+      midmonth = 15  ! data is given on 15th of every month
+!      midmonth = fix(p5 * real(daymo(mmonth),kind=dbl_kind))  ! exact middle
+
+      ! Compute record numbers for surrounding months
+      maxrec = 12
+      ixm  = mod(mmonth+maxrec-2,maxrec) + 1
+      ixp  = mod(mmonth,         maxrec) + 1
+      if (mday >= midmonth) ixm = -99  ! other two points will be used
+      if (mday <  midmonth) ixp = -99
+
+      ! Determine whether interpolation will use values 1:2 or 2:3
+      ! recslot = 2 means we use values 1:2, with the current value (2)
+      !  in the second slot
+      ! recslot = 1 means we use values 2:3, with the current value (2)
+      !  in the first slot
+      recslot = 1                             ! latter half of month
+      if (mday < midmonth) recslot = 2        ! first half of month
+
+      ! Find interpolation coefficients
+      call interp_coeff_monthly (recslot)
+
+      sst_data(:,:,:,:) = c0
+      do n = nfld, 1, -1
+        do iblk = 1, nblocks
+        ! use sst_data arrays as temporary work space until n=1
+        if (ixm /= -99) then  ! first half of month
+          sst_data(:,:,1,iblk) = ocn_frc_m(:,:,iblk,n,ixm)
+          sst_data(:,:,2,iblk) = ocn_frc_m(:,:,iblk,n,mmonth)
+        else                 ! second half of month
+          sst_data(:,:,1,iblk) = ocn_frc_m(:,:,iblk,n,mmonth)
+          sst_data(:,:,2,iblk) = ocn_frc_m(:,:,iblk,n,ixp)
+        endif
+        enddo
+
+        call interpolate_data (sst_data,work1)
+        ! masking by hm is necessary due to NaNs in the data file
+        do j = 1, ny_block
+          do i = 1, nx_block
+            if (n == 2) sss    (i,j,:) = c0
+            if (n == 3) hmix   (i,j,:) = c0
+            if (n == 4) uocn   (i,j,:) = c0
+            if (n == 5) vocn   (i,j,:) = c0
+            if (n == 6) qdp    (i,j,:) = c0
+            do iblk = 1, nblocks
+              if (hm(i,j,iblk) == c1) then
+                if (n == 2) sss    (i,j,iblk) = work1(i,j,iblk)
+                if (n == 3) hmix   (i,j,iblk) = max(mixed_layer_depth_default,work1(i,j,iblk))
+                if (n == 4) uocn   (i,j,iblk) = work1(i,j,iblk)
+                if (n == 5) vocn   (i,j,iblk) = work1(i,j,iblk)
+                if (n == 6) qdp    (i,j,iblk) = work1(i,j,iblk)
+              endif
+            enddo
+          enddo
+        enddo
+      enddo
+
+      do j = 1, ny_block
+         do i = 1, nx_block
+            sss (i,j,:) = max (sss(i,j,:), c0)
+            hmix(i,j,:) = max(hmix(i,j,:), c0)
+         enddo
+      enddo
+
+      call ocn_freezing_temperature
+
+      if (restore_ocn) then
+        do j = 1, ny_block
+         do i = 1, nx_block
+           sst(i,j,:) = sst(i,j,:) + (work1(i,j,:)-sst(i,j,:))*dt/trest
+         enddo
+        enddo
+!     else sst is only updated in ice_ocean.F
+      endif
+
+      ! initialize sst properly on first step
+      if (istep1 <= 1 .and. .not. (restart)) then
+        call interpolate_data (sst_data,sst)
+        !$OMP PARALLEL DO PRIVATE(iblk,i,j)
+        do iblk = 1, nblocks
+         do j = 1, ny_block
+          do i = 1, nx_block
+            if (hm(i,j,iblk) == c1) then
+              sst(i,j,iblk) =  max (sst(i,j,iblk), Tf(i,j,iblk))
+            else
+              sst(i,j,iblk) = c0
+            endif
+          enddo
+         enddo
+        enddo
+        !$OMP END PARALLEL DO
+      endif
+
+      if (debug_forcing) then
+         if (my_task == master_task)  &
+               write (nu_diag,*) 'ocn_data_access'
+           vmin = global_minval(Tf,distrb_info,tmask)
+           vmax = global_maxval(Tf,distrb_info,tmask)
+           if (my_task.eq.master_task)  &
+               write (nu_diag,*) 'Tf',vmin,vmax
+           vmin = global_minval(sst,distrb_info,tmask)
+           vmax = global_maxval(sst,distrb_info,tmask)
+           if (my_task.eq.master_task)  &
+               write (nu_diag,*) 'sst',vmin,vmax
+           vmin = global_minval(sss,distrb_info,tmask)
+           vmax = global_maxval(sss,distrb_info,tmask)
+           if (my_task.eq.master_task)  &
+               write (nu_diag,*) 'sss',vmin,vmax
+           vmin = global_minval(hmix,distrb_info,tmask)
+           vmax = global_maxval(hmix,distrb_info,tmask)
+           if (my_task.eq.master_task)  &
+               write (nu_diag,*) 'hmix',vmin,vmax
+           vmin = global_minval(uocn,distrb_info,umask)
+           vmax = global_maxval(uocn,distrb_info,umask)
+           if (my_task.eq.master_task)  &
+               write (nu_diag,*) 'uocn',vmin,vmax
+           vmin = global_minval(vocn,distrb_info,umask)
+           vmax = global_maxval(vocn,distrb_info,umask)
+           if (my_task.eq.master_task)  &
+               write (nu_diag,*) 'vocn',vmin,vmax
+           vmin = global_minval(qdp,distrb_info,tmask)
+           vmax = global_maxval(qdp,distrb_info,tmask)
+           if (my_task.eq.master_task)  &
+               write (nu_diag,*) 'qdp',vmin,vmax
+      endif
+
+      end subroutine ocn_data_access
 
 !=======================================================================
 ! ocean data for oned configuration
