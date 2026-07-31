@@ -288,6 +288,13 @@
     nfreq           = 25
     restart_coszen  = .false.
     restore_ice     = .false.
+    restore_ice_data_type  = 'legacy'
+    restore_ice_data_file  = 'unknown_restore_ice_file'
+    restore_ice_cycle_year = .true.
+    restore_ice_use_west   = .true.
+    restore_ice_use_east   = .true.
+    restore_ice_use_south  = .true.
+    restore_ice_use_north  = .true.
     restore_ocn     = .false.
     trestore        =  90
     precip_units    = 'mm_per_month'

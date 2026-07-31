@@ -100,6 +100,10 @@
           bgc_data_type, &
           ocn_data_type, ocn_data_dir, wave_spec_file,  &
           oceanmixed_file, restore_ocn, trestore, &
+          restore_ice_data_type, restore_ice_data_file, &
+          restore_ice_cycle_year, restore_ice_use_west, &
+          restore_ice_use_east, restore_ice_use_south, &
+          restore_ice_use_north, &
           ice_data_type, ice_data_conc, ice_data_dist, &
           snw_filename, &
           snw_tau_fname, snw_kappa_fname, snw_drdt0_fname, &
@@ -288,6 +292,10 @@
         fbot_xfer_type, update_ocn_f,    l_mpond_fresh, tfrz_option,    &
         saltflux_option,ice_ref_salinity,cpl_frazil,    congel_freeze,  &
         oceanmixed_ice, restore_ice,     restore_ocn,   trestore,       &
+        restore_ice_data_type, restore_ice_data_file,                   &
+        restore_ice_cycle_year, restore_ice_use_west,                   &
+        restore_ice_use_east,  restore_ice_use_south,                   &
+        restore_ice_use_north,                                          &
         precip_units,   default_season,                                 &
         wave_spec_type, nfreq,           wave_height_type,              &
         atm_data_type,  ocn_data_type,   bgc_data_type, fe_data_type,   &
@@ -579,6 +587,13 @@
       restore_ocn     = .false.   ! restore sst if true
       trestore        = 90        ! restoring timescale, days (0 instantaneous)
       restore_ice     = .false.   ! restore ice state on grid edges if true
+      restore_ice_data_type = 'legacy' ! or 'daily_netcdf' / 'monthly_netcdf'
+      restore_ice_data_file = 'unknown_restore_ice_file'
+      restore_ice_cycle_year = .true.
+      restore_ice_use_west  = .true.
+      restore_ice_use_east  = .true.
+      restore_ice_use_south = .true.
+      restore_ice_use_north = .true.
       restart_mod     = 'none'    ! restart modification option
       debug_forcing   = .false.   ! true writes diagnostics for input forcing
 
@@ -1200,6 +1215,13 @@
       call broadcast_scalar(restore_ocn,          master_task)
       call broadcast_scalar(trestore,             master_task)
       call broadcast_scalar(restore_ice,          master_task)
+      call broadcast_scalar(restore_ice_data_type, master_task)
+      call broadcast_scalar(restore_ice_data_file, master_task)
+      call broadcast_scalar(restore_ice_cycle_year, master_task)
+      call broadcast_scalar(restore_ice_use_west, master_task)
+      call broadcast_scalar(restore_ice_use_east, master_task)
+      call broadcast_scalar(restore_ice_use_south, master_task)
+      call broadcast_scalar(restore_ice_use_north, master_task)
       call broadcast_scalar(debug_forcing,        master_task)
       call broadcast_array (latpnt(1:2),          master_task)
       call broadcast_array (lonpnt(1:2),          master_task)
@@ -2748,6 +2770,15 @@
             write(nu_diag,1011) ' restore_ocn      = ', restore_ocn
          endif
          write(nu_diag,1011) ' restore_ice      = ', restore_ice
+         if (restore_ice) then
+            write(nu_diag,1031) ' restore_ice_data_type = ', trim(restore_ice_data_type)
+            write(nu_diag,1031) ' restore_ice_data_file = ', trim(restore_ice_data_file)
+            write(nu_diag,1011) ' restore_ice_cycle_year = ', restore_ice_cycle_year
+            write(nu_diag,1011) ' restore_ice_use_west = ', restore_ice_use_west
+            write(nu_diag,1011) ' restore_ice_use_east = ', restore_ice_use_east
+            write(nu_diag,1011) ' restore_ice_use_south = ', restore_ice_use_south
+            write(nu_diag,1011) ' restore_ice_use_north = ', restore_ice_use_north
+         endif
          if (restore_ice .or. restore_ocn) &
          write(nu_diag,1021) ' trestore         = ', trestore
 

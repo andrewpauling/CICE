@@ -142,7 +142,11 @@
          ocn_data_dir , & ! top directory for ocean data
          wave_spec_dir, & ! dir name for wave spectrum
          wave_spec_file,& ! file name for wave spectrum
-         oceanmixed_file  ! file name for ocean forcing data
+         oceanmixed_file, & ! file name for ocean forcing data
+         restore_ice_data_file  ! file name for time-varying ice boundary data
+
+      character(char_len), public :: &
+         restore_ice_data_type   ! 'legacy', 'daily_netcdf', or 'monthly_netcdf'
 
       integer (kind=int_kind), parameter :: &
          nfld = 8   ! number of fields to search for in forcing file
@@ -159,6 +163,13 @@
 
       logical (kind=log_kind), public :: &
          restore_ocn                 ! restore sst if true
+
+      logical (kind=log_kind), public :: &
+         restore_ice_cycle_year, &
+         restore_ice_use_west  , &
+         restore_ice_use_east  , &
+         restore_ice_use_south , &
+         restore_ice_use_north
 
       integer (kind=int_kind), public :: &
          trestore                    ! restoring time scale (days)
