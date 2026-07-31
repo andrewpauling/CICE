@@ -8,9 +8,12 @@
 
       use ice_kinds_mod
       use ice_blocks, only: nx_block, ny_block
-      use ice_constants, only: c0, c1, c2, p2
-      use ice_domain_size, only: ncat, max_blocks
-      use ice_forcing, only: trestore, trest
+       use ice_constants, only: c0, c1, c2, p2
+      use ice_domain_size, only: ncat, nilyr, max_blocks
+       use ice_forcing, only: trestore, trest, restore_ice_use_west, restore_ice_use_east, &
+         restore_ice_use_south, restore_ice_use_north
+      use ice_restore_forcing, only: restore_forcing_init, restore_forcing_update, &
+          restore_forcing_is_active, restore_forcing_has_trcrn_data, restore_forcing_uses_bc_fields
       use ice_state, only: aicen, vicen, vsnon, trcrn
       use ice_timers, only: ice_timer_start, ice_timer_stop, timer_bound
       use ice_exit, only: abort_ice
@@ -20,6 +23,8 @@
       use icepack_intfc, only: icepack_query_parameters, &
           icepack_query_tracer_sizes, icepack_query_tracer_flags, &
           icepack_query_tracer_indices
+       use icepack_mushy_physics, only: icepack_enthalpy_snow, icepack_enthalpy_mush
+       use icepack_parameters, only: rhoi, cp_ice, cp_ocn, Lfresh
 
       implicit none
       private
@@ -39,6 +44,35 @@
 
       real (kind=dbl_kind), dimension (:,:,:,:,:), allocatable, public :: &
          trcrn_rest     ! tracers
+
+      real (kind=dbl_kind), dimension (:,:,:,:), allocatable :: &
+         Tsfc_rest
+
+      real (kind=dbl_kind), dimension (:,:,:,:,:), allocatable :: &
+         Tinz_rest, Sinz_rest
+
+      ! Geometry and Icepack metadata used by every restoring step are static.
+      ! Cache them once during ice_HaloRestore_init.
+      integer (kind=int_kind) :: &
+         restore_cached_ntrcr = 0, &
+         restore_cached_nt_Tsfc = 0, &
+         restore_cached_nt_qice = 0, &
+         restore_cached_nt_sice = 0, &
+         restore_cached_nt_qsno = 0, &
+         restore_cached_ktherm = 0
+
+      real (kind=dbl_kind) :: &
+         restore_cached_secday = c0, &
+         restore_cached_puny = c0
+
+      integer (kind=int_kind), dimension(:), allocatable :: &
+         restore_cached_ilo, restore_cached_ihi, &
+         restore_cached_jlo, restore_cached_jhi, &
+         restore_cached_east_bc, restore_cached_north_bc
+
+      logical (kind=log_kind), dimension(:), allocatable :: &
+         restore_cached_west_block, restore_cached_east_block, &
+         restore_cached_south_block, restore_cached_north_block
 
 !=======================================================================
 
@@ -86,8 +120,12 @@
    if (icepack_warnings_aborted()) call abort_ice(error_message=subname, &
       file=__FILE__, line=__LINE__)
 
+   call restore_forcing_init(ntrcr)
+   call ice_HaloRestore_cache_metadata(ntrcr)
+
    if ((ew_boundary_type == 'open' .or. &
-        ns_boundary_type == 'open') .and. .not.(restart_ext)) then
+        ns_boundary_type == 'open') .and. .not.(restart_ext) .and. &
+        .not. restore_forcing_is_active()) then
       if (my_task == master_task) write (nu_diag,*) ' ERROR: restart_ext=F and open boundaries'
       call abort_ice(error_message=subname//'open boundary and restart_ext=F', &
          file=__FILE__, line=__LINE__)
@@ -96,11 +134,17 @@
    allocate (aicen_rest(nx_block,ny_block,ncat,max_blocks), &
              vicen_rest(nx_block,ny_block,ncat,max_blocks), &
              vsnon_rest(nx_block,ny_block,ncat,max_blocks), &
+             Tsfc_rest(nx_block,ny_block,ncat,max_blocks), &
+             Tinz_rest(nx_block,ny_block,nilyr,ncat,max_blocks), &
+             Sinz_rest(nx_block,ny_block,nilyr,ncat,max_blocks), &
              trcrn_rest(nx_block,ny_block,ntrcr,ncat,max_blocks))
 
    aicen_rest(:,:,:,:) = c0
    vicen_rest(:,:,:,:) = c0
    vsnon_rest(:,:,:,:) = c0
+   Tsfc_rest(:,:,:,:) = c0
+   Tinz_rest(:,:,:,:,:) = c0
+   Sinz_rest(:,:,:,:,:) = c0
    trcrn_rest(:,:,:,:,:) = c0
 
 !-----------------------------------------------------------------------
@@ -109,7 +153,16 @@
 ! these arrays could be set to values read from a file...
 !-----------------------------------------------------------------------
 
-   if (trim(restore_ic) == 'defined') then
+   if (restore_forcing_is_active()) then
+
+      call restore_forcing_update(aicen_rest, vicen_rest, vsnon_rest, trcrn_rest, &
+           Tsfc_rest, Tinz_rest, Sinz_rest)
+      if (restore_forcing_uses_bc_fields()) then
+         call restore_forcing_rebuild_thermo_trcrn(trcrn_rest, aicen_rest, vicen_rest, vsnon_rest, &
+              Tsfc_rest, Tinz_rest, Sinz_rest)
+      endif
+
+   else if (trim(restore_ic) == 'defined') then
 
       ! restore to defined ice state
       !$OMP PARALLEL DO PRIVATE(iblk,ilo,ihi,jlo,jhi,this_block, &
@@ -267,22 +320,208 @@
       do n = 1, ncat
          do j = 1, ny_block
          do i = 1, nx_block
-            aicen_rest(i,j,n,iblk) = aicen_rest(i,j,n,iblk) * hm(i,j,iblk)
-            vicen_rest(i,j,n,iblk) = vicen_rest(i,j,n,iblk) * hm(i,j,iblk)
-            vsnon_rest(i,j,n,iblk) = vsnon_rest(i,j,n,iblk) * hm(i,j,iblk)
-            do nt = 1, ntrcr
-               trcrn_rest(i,j,nt,n,iblk) = trcrn_rest(i,j,nt,n,iblk) &
-                                                            * hm(i,j,iblk)
-            enddo
+               if (hm(i,j,iblk) <= c0) then
+                  aicen_rest(i,j,n,iblk) = c0
+                  vicen_rest(i,j,n,iblk) = c0
+                  vsnon_rest(i,j,n,iblk) = c0
+                  do nt = 1, ntrcr
+                     trcrn_rest(i,j,nt,n,iblk) = c0
+                  enddo
+               endif
          enddo
          enddo
       enddo
    enddo
 
+   if (restore_forcing_is_active() .and. .not. restart_ext) then
+      do iblk = 1, nblocks
+         this_block = get_block(blocks_ice(iblk),iblk)
+         ilo = this_block%ilo
+         ihi = this_block%ihi
+         jlo = this_block%jlo
+         jhi = this_block%jhi
+
+         if (this_block%iblock == 1 .and. trim(ew_boundary_type) /= 'cyclic') then
+            do n = 1, ncat
+            do j = 1, ny_block
+            do i = 1, ilo - 1
+               aicen(i,j,n,iblk) = aicen_rest(i,j,n,iblk)
+               vicen(i,j,n,iblk) = vicen_rest(i,j,n,iblk)
+               vsnon(i,j,n,iblk) = vsnon_rest(i,j,n,iblk)
+               do nt = 1, ntrcr
+                  trcrn(i,j,nt,n,iblk) = trcrn_rest(i,j,nt,n,iblk)
+               enddo
+            enddo
+            enddo
+            enddo
+         endif
+
+         if (this_block%iblock == nblocks_x .and. trim(ew_boundary_type) /= 'cyclic') then
+            ibc = nx_block
+            do i = nx_block, 1, -1
+               npad = 0
+               if (this_block%i_glob(i) == 0) then
+                  do j = 1, ny_block
+                     npad = npad + this_block%j_glob(j)
+                  enddo
+               endif
+               if (npad /= 0) ibc = ibc - 1
+            enddo
+
+            do n = 1, ncat
+            do j = 1, ny_block
+            do i = ihi + 1, ibc
+               aicen(i,j,n,iblk) = aicen_rest(i,j,n,iblk)
+               vicen(i,j,n,iblk) = vicen_rest(i,j,n,iblk)
+               vsnon(i,j,n,iblk) = vsnon_rest(i,j,n,iblk)
+               do nt = 1, ntrcr
+                  trcrn(i,j,nt,n,iblk) = trcrn_rest(i,j,nt,n,iblk)
+               enddo
+            enddo
+            enddo
+            enddo
+         endif
+
+         if (this_block%jblock == 1 .and. trim(ns_boundary_type) /= 'cyclic') then
+            do n = 1, ncat
+            do j = 1, jlo - 1
+            do i = 1, nx_block
+               aicen(i,j,n,iblk) = aicen_rest(i,j,n,iblk)
+               vicen(i,j,n,iblk) = vicen_rest(i,j,n,iblk)
+               vsnon(i,j,n,iblk) = vsnon_rest(i,j,n,iblk)
+               do nt = 1, ntrcr
+                  trcrn(i,j,nt,n,iblk) = trcrn_rest(i,j,nt,n,iblk)
+               enddo
+            enddo
+            enddo
+            enddo
+         endif
+
+         if (this_block%jblock == nblocks_y .and. trim(ns_boundary_type) /= 'cyclic' .and. &
+             trim(ns_boundary_type) /= 'tripole' .and. trim(ns_boundary_type) /= 'tripoleT') then
+            ibc = ny_block
+            do j = ny_block, 1, -1
+               npad = 0
+               if (this_block%j_glob(j) == 0) then
+                  do i = 1, nx_block
+                     npad = npad + this_block%i_glob(i)
+                  enddo
+               endif
+               if (npad /= 0) ibc = ibc - 1
+            enddo
+
+            do n = 1, ncat
+            do j = jhi + 1, ibc
+            do i = 1, nx_block
+               aicen(i,j,n,iblk) = aicen_rest(i,j,n,iblk)
+               vicen(i,j,n,iblk) = vicen_rest(i,j,n,iblk)
+               vsnon(i,j,n,iblk) = vsnon_rest(i,j,n,iblk)
+               do nt = 1, ntrcr
+                  trcrn(i,j,nt,n,iblk) = trcrn_rest(i,j,nt,n,iblk)
+               enddo
+            enddo
+            enddo
+            enddo
+         endif
+      enddo
+   endif
+
    if (my_task == master_task) &
       write (nu_diag,*) 'ice restoring timescale = ',trestore,' days'
 
  end subroutine ice_HaloRestore_init
+
+!=======================================================================
+
+ subroutine ice_HaloRestore_cache_metadata(ntrcr)
+
+      use ice_blocks, only: block, get_block, nblocks_x, nblocks_y
+      use ice_domain, only: ew_boundary_type, ns_boundary_type, nblocks, blocks_ice
+
+   integer (kind=int_kind), intent(in) :: ntrcr
+
+   integer (kind=int_kind) :: i, j, iblk, npad
+   type (block) :: this_block
+
+   character(len=*), parameter :: subname = '(ice_HaloRestore_cache_metadata)'
+
+   restore_cached_ntrcr = ntrcr
+   call icepack_query_parameters(secday_out=restore_cached_secday, &
+      puny_out=restore_cached_puny)
+
+   if (restore_forcing_uses_bc_fields()) then
+      call icepack_query_tracer_indices(nt_Tsfc_out=restore_cached_nt_Tsfc, &
+         nt_qice_out=restore_cached_nt_qice, nt_sice_out=restore_cached_nt_sice, &
+         nt_qsno_out=restore_cached_nt_qsno)
+      call icepack_query_parameters(ktherm_out=restore_cached_ktherm)
+   endif
+
+   call icepack_warnings_flush(nu_diag)
+   if (icepack_warnings_aborted()) call abort_ice(error_message=subname, &
+      file=__FILE__, line=__LINE__)
+
+   if (.not. allocated(restore_cached_ilo)) then
+      allocate(restore_cached_ilo(max_blocks), restore_cached_ihi(max_blocks), &
+         restore_cached_jlo(max_blocks), restore_cached_jhi(max_blocks), &
+         restore_cached_east_bc(max_blocks), restore_cached_north_bc(max_blocks), &
+         restore_cached_west_block(max_blocks), restore_cached_east_block(max_blocks), &
+         restore_cached_south_block(max_blocks), restore_cached_north_block(max_blocks))
+   endif
+
+   restore_cached_ilo = 0
+   restore_cached_ihi = 0
+   restore_cached_jlo = 0
+   restore_cached_jhi = 0
+   restore_cached_east_bc = nx_block
+   restore_cached_north_bc = ny_block
+   restore_cached_west_block = .false.
+   restore_cached_east_block = .false.
+   restore_cached_south_block = .false.
+   restore_cached_north_block = .false.
+
+   do iblk = 1, nblocks
+      this_block = get_block(blocks_ice(iblk), iblk)
+      restore_cached_ilo(iblk) = this_block%ilo
+      restore_cached_ihi(iblk) = this_block%ihi
+      restore_cached_jlo(iblk) = this_block%jlo
+      restore_cached_jhi(iblk) = this_block%jhi
+
+      restore_cached_west_block(iblk) = this_block%iblock == 1 .and. &
+         trim(ew_boundary_type) /= 'cyclic'
+      restore_cached_east_block(iblk) = this_block%iblock == nblocks_x .and. &
+         trim(ew_boundary_type) /= 'cyclic'
+      restore_cached_south_block(iblk) = this_block%jblock == 1 .and. &
+         trim(ns_boundary_type) /= 'cyclic'
+      restore_cached_north_block(iblk) = this_block%jblock == nblocks_y .and. &
+         trim(ns_boundary_type) /= 'cyclic' .and. trim(ns_boundary_type) /= 'tripole' .and. &
+         trim(ns_boundary_type) /= 'tripoleT'
+
+      if (restore_cached_east_block(iblk)) then
+         do i = nx_block, 1, -1
+            npad = 0
+            if (this_block%i_glob(i) == 0) then
+               do j = 1, ny_block
+                  npad = npad + this_block%j_glob(j)
+               enddo
+            endif
+            if (npad /= 0) restore_cached_east_bc(iblk) = restore_cached_east_bc(iblk) - 1
+         enddo
+      endif
+
+      if (restore_cached_north_block(iblk)) then
+         do j = ny_block, 1, -1
+            npad = 0
+            if (this_block%j_glob(j) == 0) then
+               do i = 1, nx_block
+                  npad = npad + this_block%i_glob(i)
+               enddo
+            endif
+            if (npad /= 0) restore_cached_north_bc(iblk) = restore_cached_north_bc(iblk) - 1
+         enddo
+      endif
+   enddo
+
+ end subroutine ice_HaloRestore_cache_metadata
 
 !=======================================================================
 
@@ -546,6 +785,114 @@
 
 !=======================================================================
 
+ subroutine restore_forcing_rebuild_thermo_trcrn(trcrn_target, aicen_target, vicen_target, vsnon_target, &
+      Tsfc_target, Tinz_target, Sinz_target)
+
+      use ice_domain, only: nblocks
+      use ice_domain_size, only: nilyr, nslyr
+      use ice_flux, only: Tmltz
+
+   real (kind=dbl_kind), dimension (:,:,:,:,:), intent(inout) :: trcrn_target
+   real (kind=dbl_kind), dimension (:,:,:,:), intent(in) :: aicen_target, vicen_target, vsnon_target, Tsfc_target
+   real (kind=dbl_kind), dimension (:,:,:,:,:), intent(in) :: Tinz_target, Sinz_target
+
+   integer (kind=int_kind) :: &
+      i, j, iblk, n, k, ilo, ihi, jlo, jhi, ibc, &
+      nt_Tsfc, nt_qice, nt_sice, nt_qsno, ktherm
+
+   real (kind=dbl_kind) :: Tsfc_cell, Tice_cell, qsnow
+
+   nt_Tsfc = restore_cached_nt_Tsfc
+   nt_qice = restore_cached_nt_qice
+   nt_sice = restore_cached_nt_sice
+   nt_qsno = restore_cached_nt_qsno
+   ktherm = restore_cached_ktherm
+
+   do iblk = 1, nblocks
+      ilo = restore_cached_ilo(iblk)
+      ihi = restore_cached_ihi(iblk)
+      jlo = restore_cached_jlo(iblk)
+      jhi = restore_cached_jhi(iblk)
+
+      if (restore_ice_use_west .and. restore_cached_west_block(iblk)) then
+         do n = 1, ncat
+         do j = 1, ny_block
+         do i = 1, ilo
+            call restore_forcing_rebuild_thermo_cell(i, j, n, iblk)
+         enddo
+         enddo
+         enddo
+      endif
+
+      if (restore_ice_use_east .and. restore_cached_east_block(iblk)) then
+         ibc = restore_cached_east_bc(iblk)
+         do n = 1, ncat
+         do j = 1, ny_block
+         do i = ihi, ibc
+            call restore_forcing_rebuild_thermo_cell(i, j, n, iblk)
+         enddo
+         enddo
+         enddo
+      endif
+
+      if (restore_ice_use_south .and. restore_cached_south_block(iblk)) then
+         do n = 1, ncat
+         do j = 1, jlo
+         do i = 1, nx_block
+            call restore_forcing_rebuild_thermo_cell(i, j, n, iblk)
+         enddo
+         enddo
+         enddo
+      endif
+
+      if (restore_ice_use_north .and. restore_cached_north_block(iblk)) then
+         ibc = restore_cached_north_bc(iblk)
+         do n = 1, ncat
+         do j = jhi, ibc
+         do i = 1, nx_block
+            call restore_forcing_rebuild_thermo_cell(i, j, n, iblk)
+         enddo
+         enddo
+         enddo
+      endif
+   enddo
+
+ contains
+
+   subroutine restore_forcing_rebuild_thermo_cell(i, j, n, iblk)
+
+      integer (kind=int_kind), intent(in) :: i, j, n, iblk
+
+      if (aicen_target(i,j,n,iblk) <= c0 .and. vicen_target(i,j,n,iblk) <= c0 .and. &
+          vsnon_target(i,j,n,iblk) <= c0) then
+         return
+      endif
+
+      Tsfc_cell = min(c0, Tsfc_target(i,j,n,iblk))
+      trcrn_target(i,j,nt_Tsfc,n,iblk) = Tsfc_cell
+
+      qsnow = icepack_enthalpy_snow(Tsfc_cell)
+      do k = 1, nslyr
+         trcrn_target(i,j,nt_qsno+k-1,n,iblk) = qsnow
+      enddo
+
+      do k = 1, nilyr
+         Tice_cell = min(-1.0e-12_dbl_kind, Tinz_target(i,j,k,n,iblk))
+         trcrn_target(i,j,nt_sice+k-1,n,iblk) = Sinz_target(i,j,k,n,iblk)
+         if (ktherm == 2) then
+            trcrn_target(i,j,nt_qice+k-1,n,iblk) = icepack_enthalpy_mush(Tice_cell, Sinz_target(i,j,k,n,iblk))
+         else
+            trcrn_target(i,j,nt_qice+k-1,n,iblk) = -(rhoi * (cp_ice * (Tmltz(i,j,k,iblk) - Tice_cell) + &
+               Lfresh * (c1 - Tmltz(i,j,k,iblk) / Tice_cell) - cp_ocn * Tmltz(i,j,k,iblk)))
+         endif
+      enddo
+
+   end subroutine restore_forcing_rebuild_thermo_cell
+
+ end subroutine restore_forcing_rebuild_thermo_trcrn
+
+!=======================================================================
+
 !  This subroutine is intended for restoring the ice state to desired
 !  values in cells surrounding the grid.
 !  Note: This routine will need to be modified for nghost > 1.
@@ -553,10 +900,8 @@
 
  subroutine ice_HaloRestore
 
-      use ice_blocks, only: block, get_block, nblocks_x, nblocks_y
       use ice_calendar, only: dt
-      use ice_domain, only: ew_boundary_type, ns_boundary_type, &
-          nblocks, blocks_ice
+      use ice_domain, only: nblocks
 
 !-----------------------------------------------------------------------
 !
@@ -568,24 +913,39 @@
      i,j,iblk,nt,n,      &! dummy loop indices
      ilo,ihi,jlo,jhi,    &! beginning and end of physical domain
      ibc,                &! ghost cell column or row
-     ntrcr,              &!
-     npad                 ! padding column/row counter
-
-   type (block) :: &
-     this_block  ! block info for current block
+     ntrcr                !
 
    real (dbl_kind) :: &
      secday,             &!
-     ctime                ! dt/trest
+       ctime,              &! dt/trest
+       puny,               &! small positive threshold from Icepack
+          aicen_old,          &! pre-restore category area
+       aicen_new,          &! relaxed category area for full-state restore
+          vsnon_old,          &! pre-restore category snow volume
+       hicen_target,       &! target category mean ice thickness
+       hsnon_target         ! target category mean snow thickness
 
-   character(len=*), parameter :: subname = '(ice_HaloRestore)'
+    logical (kind=log_kind) :: &
+          restore_without_trcrn, &
+          restore_direct_trcrn
 
    call ice_timer_start(timer_bound)
-   call icepack_query_parameters(secday_out=secday)
-   call icepack_query_tracer_sizes(ntrcr_out=ntrcr)
-   call icepack_warnings_flush(nu_diag)
-   if (icepack_warnings_aborted()) call abort_ice(error_message=subname, &
-      file=__FILE__, line=__LINE__)
+   secday = restore_cached_secday
+   puny = restore_cached_puny
+   ntrcr = restore_cached_ntrcr
+
+   if (restore_forcing_is_active()) then
+      call restore_forcing_update(aicen_rest, vicen_rest, vsnon_rest, trcrn_rest, &
+           Tsfc_rest, Tinz_rest, Sinz_rest)
+      if (restore_forcing_uses_bc_fields()) then
+         call restore_forcing_rebuild_thermo_trcrn(trcrn_rest, aicen_rest, vicen_rest, vsnon_rest, &
+              Tsfc_rest, Tinz_rest, Sinz_rest)
+      endif
+   endif
+
+   restore_direct_trcrn = restore_forcing_is_active() .and. &
+      (restore_forcing_has_trcrn_data() .or. restore_forcing_uses_bc_fields())
+   restore_without_trcrn = restore_forcing_is_active() .and. .not. restore_direct_trcrn
 
 !-----------------------------------------------------------------------
 !
@@ -607,123 +967,200 @@
 !
 !-----------------------------------------------------------------------
 
-   !$OMP PARALLEL DO PRIVATE(iblk,ilo,ihi,jlo,jhi,this_block, &
-   !$OMP                     i,j,n,nt,ibc,npad)
+   !$OMP PARALLEL DO PRIVATE(iblk,ilo,ihi,jlo,jhi, &
+   !$OMP                     i,j,n,nt,ibc)
    do iblk = 1, nblocks
-      this_block = get_block(blocks_ice(iblk),iblk)
-         ilo = this_block%ilo
-         ihi = this_block%ihi
-         jlo = this_block%jlo
-         jhi = this_block%jhi
+         ilo = restore_cached_ilo(iblk)
+         ihi = restore_cached_ihi(iblk)
+         jlo = restore_cached_jlo(iblk)
+         jhi = restore_cached_jhi(iblk)
 
-      if (this_block%iblock == 1) then              ! west edge
-         if (trim(ew_boundary_type) /= 'cyclic') then
+      if (restore_cached_west_block(iblk)) then     ! west edge
             do n = 1, ncat
             do j = 1, ny_block
-            do i = 1, ilo
-               aicen(i,j,n,iblk) = aicen(i,j,n,iblk) &
-                  + (aicen_rest(i,j,n,iblk)-aicen(i,j,n,iblk))*ctime
-               vicen(i,j,n,iblk) = vicen(i,j,n,iblk) &
-                  + (vicen_rest(i,j,n,iblk)-vicen(i,j,n,iblk))*ctime
-               vsnon(i,j,n,iblk) = vsnon(i,j,n,iblk) &
-                  + (vsnon_rest(i,j,n,iblk)-vsnon(i,j,n,iblk))*ctime
-               do nt = 1, ntrcr
-                  trcrn(i,j,nt,n,iblk) = trcrn(i,j,nt,n,iblk) &
-                     + (trcrn_rest(i,j,nt,n,iblk)-trcrn(i,j,nt,n,iblk))*ctime
-               enddo
-            enddo
-            enddo
-            enddo
-         endif
-      endif
-
-      if (this_block%iblock == nblocks_x) then  ! east edge
-         if (trim(ew_boundary_type) /= 'cyclic') then
-            ! locate ghost cell column (avoid padding)
-            ibc = nx_block
-            do i = nx_block, 1, -1
-               npad = 0
-               if (this_block%i_glob(i) == 0) then
-                  do j = 1, ny_block
-                     npad = npad + this_block%j_glob(j)
+            do i = 1, merge(ilo - 1, ilo, restore_without_trcrn)
+               if (restore_direct_trcrn) then
+                  aicen_old = aicen(i,j,n,iblk)
+                  vsnon_old = vsnon(i,j,n,iblk)
+                  aicen_new = aicen(i,j,n,iblk) &
+                     + (aicen_rest(i,j,n,iblk)-aicen(i,j,n,iblk))*ctime
+                  aicen(i,j,n,iblk) = aicen_new
+                  if (aicen_rest(i,j,n,iblk) > puny) then
+                     hicen_target = vicen_rest(i,j,n,iblk) / aicen_rest(i,j,n,iblk)
+                     hsnon_target = vsnon_rest(i,j,n,iblk) / aicen_rest(i,j,n,iblk)
+                     vicen(i,j,n,iblk) = max(aicen_new,c0) * hicen_target
+                     vsnon(i,j,n,iblk) = max(aicen_new,c0) * hsnon_target
+                  else
+                     vicen(i,j,n,iblk) = vicen(i,j,n,iblk) &
+                        + (vicen_rest(i,j,n,iblk)-vicen(i,j,n,iblk))*ctime
+                     vsnon(i,j,n,iblk) = vsnon(i,j,n,iblk) &
+                        + (vsnon_rest(i,j,n,iblk)-vsnon(i,j,n,iblk))*ctime
+                  endif
+                  do nt = 1, ntrcr
+                     trcrn(i,j,nt,n,iblk) = trcrn(i,j,nt,n,iblk) &
+                        + (trcrn_rest(i,j,nt,n,iblk)-trcrn(i,j,nt,n,iblk))*ctime
+                  enddo
+                  if ((aicen_old <= puny .and. aicen_rest(i,j,n,iblk) > puny) .or. &
+                      (vsnon_old <= puny .and. vsnon_rest(i,j,n,iblk) > puny)) then
+                     trcrn(i,j,:,n,iblk) = trcrn_rest(i,j,:,n,iblk)
+                  endif
+               else
+                  aicen(i,j,n,iblk) = aicen(i,j,n,iblk) &
+                     + (aicen_rest(i,j,n,iblk)-aicen(i,j,n,iblk))*ctime
+                  vicen(i,j,n,iblk) = vicen(i,j,n,iblk) &
+                     + (vicen_rest(i,j,n,iblk)-vicen(i,j,n,iblk))*ctime
+                  vsnon(i,j,n,iblk) = vsnon(i,j,n,iblk) &
+                     + (vsnon_rest(i,j,n,iblk)-vsnon(i,j,n,iblk))*ctime
+                  do nt = 1, ntrcr
+                     trcrn(i,j,nt,n,iblk) = trcrn(i,j,nt,n,iblk) &
+                        + (trcrn_rest(i,j,nt,n,iblk)-trcrn(i,j,nt,n,iblk))*ctime
                   enddo
                endif
-               if (npad /= 0) ibc = ibc - 1
             enddo
+            enddo
+            enddo
+      endif
+
+      if (restore_cached_east_block(iblk)) then     ! east edge
+            ibc = restore_cached_east_bc(iblk)
 
             do n = 1, ncat
             do j = 1, ny_block
-            do i = ihi, ibc
-               aicen(i,j,n,iblk) = aicen(i,j,n,iblk) &
-                  + (aicen_rest(i,j,n,iblk)-aicen(i,j,n,iblk))*ctime
-               vicen(i,j,n,iblk) = vicen(i,j,n,iblk) &
-                  + (vicen_rest(i,j,n,iblk)-vicen(i,j,n,iblk))*ctime
-               vsnon(i,j,n,iblk) = vsnon(i,j,n,iblk) &
-                  + (vsnon_rest(i,j,n,iblk)-vsnon(i,j,n,iblk))*ctime
-               do nt = 1, ntrcr
-                  trcrn(i,j,nt,n,iblk) = trcrn(i,j,nt,n,iblk) &
-                     + (trcrn_rest(i,j,nt,n,iblk)-trcrn(i,j,nt,n,iblk))*ctime
-               enddo
-            enddo
-            enddo
-            enddo
-         endif
-      endif
-
-      if (this_block%jblock == 1) then              ! south edge
-         if (trim(ns_boundary_type) /= 'cyclic') then
-            do n = 1, ncat
-            do j = 1, jlo
-            do i = 1, nx_block
-               aicen(i,j,n,iblk) = aicen(i,j,n,iblk) &
-                  + (aicen_rest(i,j,n,iblk)-aicen(i,j,n,iblk))*ctime
-               vicen(i,j,n,iblk) = vicen(i,j,n,iblk) &
-                  + (vicen_rest(i,j,n,iblk)-vicen(i,j,n,iblk))*ctime
-               vsnon(i,j,n,iblk) = vsnon(i,j,n,iblk) &
-                  + (vsnon_rest(i,j,n,iblk)-vsnon(i,j,n,iblk))*ctime
-               do nt = 1, ntrcr
-                  trcrn(i,j,nt,n,iblk) = trcrn(i,j,nt,n,iblk) &
-                     + (trcrn_rest(i,j,nt,n,iblk)-trcrn(i,j,nt,n,iblk))*ctime
-               enddo
-            enddo
-            enddo
-            enddo
-         endif
-      endif
-
-      if (this_block%jblock == nblocks_y) then  ! north edge
-         if (trim(ns_boundary_type) /= 'cyclic' .and. &
-             trim(ns_boundary_type) /= 'tripole' .and. &
-             trim(ns_boundary_type) /= 'tripoleT') then
-            ! locate ghost cell row (avoid padding)
-            ibc = ny_block
-            do j = ny_block, 1, -1
-               npad = 0
-               if (this_block%j_glob(j) == 0) then
-                  do i = 1, nx_block
-                     npad = npad + this_block%i_glob(i)
+            do i = merge(ihi + 1, ihi, restore_without_trcrn), ibc
+               if (restore_direct_trcrn) then
+                  aicen_old = aicen(i,j,n,iblk)
+                  vsnon_old = vsnon(i,j,n,iblk)
+                  aicen_new = aicen(i,j,n,iblk) &
+                     + (aicen_rest(i,j,n,iblk)-aicen(i,j,n,iblk))*ctime
+                  aicen(i,j,n,iblk) = aicen_new
+                  if (aicen_rest(i,j,n,iblk) > puny) then
+                     hicen_target = vicen_rest(i,j,n,iblk) / aicen_rest(i,j,n,iblk)
+                     hsnon_target = vsnon_rest(i,j,n,iblk) / aicen_rest(i,j,n,iblk)
+                     vicen(i,j,n,iblk) = max(aicen_new,c0) * hicen_target
+                     vsnon(i,j,n,iblk) = max(aicen_new,c0) * hsnon_target
+                  else
+                     vicen(i,j,n,iblk) = vicen(i,j,n,iblk) &
+                        + (vicen_rest(i,j,n,iblk)-vicen(i,j,n,iblk))*ctime
+                     vsnon(i,j,n,iblk) = vsnon(i,j,n,iblk) &
+                        + (vsnon_rest(i,j,n,iblk)-vsnon(i,j,n,iblk))*ctime
+                  endif
+                  do nt = 1, ntrcr
+                     trcrn(i,j,nt,n,iblk) = trcrn(i,j,nt,n,iblk) &
+                        + (trcrn_rest(i,j,nt,n,iblk)-trcrn(i,j,nt,n,iblk))*ctime
+                  enddo
+                  if ((aicen_old <= puny .and. aicen_rest(i,j,n,iblk) > puny) .or. &
+                      (vsnon_old <= puny .and. vsnon_rest(i,j,n,iblk) > puny)) then
+                     trcrn(i,j,:,n,iblk) = trcrn_rest(i,j,:,n,iblk)
+                  endif
+               else
+                  aicen(i,j,n,iblk) = aicen(i,j,n,iblk) &
+                     + (aicen_rest(i,j,n,iblk)-aicen(i,j,n,iblk))*ctime
+                  vicen(i,j,n,iblk) = vicen(i,j,n,iblk) &
+                     + (vicen_rest(i,j,n,iblk)-vicen(i,j,n,iblk))*ctime
+                  vsnon(i,j,n,iblk) = vsnon(i,j,n,iblk) &
+                     + (vsnon_rest(i,j,n,iblk)-vsnon(i,j,n,iblk))*ctime
+                  do nt = 1, ntrcr
+                     trcrn(i,j,nt,n,iblk) = trcrn(i,j,nt,n,iblk) &
+                        + (trcrn_rest(i,j,nt,n,iblk)-trcrn(i,j,nt,n,iblk))*ctime
                   enddo
                endif
-               if (npad /= 0) ibc = ibc - 1
             enddo
+            enddo
+            enddo
+      endif
+
+      if (restore_cached_south_block(iblk)) then    ! south edge
+            do n = 1, ncat
+            do j = 1, merge(jlo - 1, jlo, restore_without_trcrn)
+            do i = 1, nx_block
+               if (restore_direct_trcrn) then
+                  aicen_old = aicen(i,j,n,iblk)
+                  vsnon_old = vsnon(i,j,n,iblk)
+                  aicen_new = aicen(i,j,n,iblk) &
+                     + (aicen_rest(i,j,n,iblk)-aicen(i,j,n,iblk))*ctime
+                  aicen(i,j,n,iblk) = aicen_new
+                  if (aicen_rest(i,j,n,iblk) > puny) then
+                     hicen_target = vicen_rest(i,j,n,iblk) / aicen_rest(i,j,n,iblk)
+                     hsnon_target = vsnon_rest(i,j,n,iblk) / aicen_rest(i,j,n,iblk)
+                     vicen(i,j,n,iblk) = max(aicen_new,c0) * hicen_target
+                     vsnon(i,j,n,iblk) = max(aicen_new,c0) * hsnon_target
+                  else
+                     vicen(i,j,n,iblk) = vicen(i,j,n,iblk) &
+                        + (vicen_rest(i,j,n,iblk)-vicen(i,j,n,iblk))*ctime
+                     vsnon(i,j,n,iblk) = vsnon(i,j,n,iblk) &
+                        + (vsnon_rest(i,j,n,iblk)-vsnon(i,j,n,iblk))*ctime
+                  endif
+                  do nt = 1, ntrcr
+                     trcrn(i,j,nt,n,iblk) = trcrn(i,j,nt,n,iblk) &
+                        + (trcrn_rest(i,j,nt,n,iblk)-trcrn(i,j,nt,n,iblk))*ctime
+                  enddo
+                  if ((aicen_old <= puny .and. aicen_rest(i,j,n,iblk) > puny) .or. &
+                      (vsnon_old <= puny .and. vsnon_rest(i,j,n,iblk) > puny)) then
+                     trcrn(i,j,:,n,iblk) = trcrn_rest(i,j,:,n,iblk)
+                  endif
+               else
+                  aicen(i,j,n,iblk) = aicen(i,j,n,iblk) &
+                     + (aicen_rest(i,j,n,iblk)-aicen(i,j,n,iblk))*ctime
+                  vicen(i,j,n,iblk) = vicen(i,j,n,iblk) &
+                     + (vicen_rest(i,j,n,iblk)-vicen(i,j,n,iblk))*ctime
+                  vsnon(i,j,n,iblk) = vsnon(i,j,n,iblk) &
+                     + (vsnon_rest(i,j,n,iblk)-vsnon(i,j,n,iblk))*ctime
+                  do nt = 1, ntrcr
+                     trcrn(i,j,nt,n,iblk) = trcrn(i,j,nt,n,iblk) &
+                        + (trcrn_rest(i,j,nt,n,iblk)-trcrn(i,j,nt,n,iblk))*ctime
+                  enddo
+               endif
+            enddo
+            enddo
+            enddo
+      endif
+
+      if (restore_cached_north_block(iblk)) then    ! north edge
+            ibc = restore_cached_north_bc(iblk)
 
             do n = 1, ncat
-            do j = jhi, ibc
+            do j = merge(jhi + 1, jhi, restore_without_trcrn), ibc
             do i = 1, nx_block
-               aicen(i,j,n,iblk) = aicen(i,j,n,iblk) &
-                  + (aicen_rest(i,j,n,iblk)-aicen(i,j,n,iblk))*ctime
-               vicen(i,j,n,iblk) = vicen(i,j,n,iblk) &
-                  + (vicen_rest(i,j,n,iblk)-vicen(i,j,n,iblk))*ctime
-               vsnon(i,j,n,iblk) = vsnon(i,j,n,iblk) &
-                  + (vsnon_rest(i,j,n,iblk)-vsnon(i,j,n,iblk))*ctime
-               do nt = 1, ntrcr
-                  trcrn(i,j,nt,n,iblk) = trcrn(i,j,nt,n,iblk) &
-                     + (trcrn_rest(i,j,nt,n,iblk)-trcrn(i,j,nt,n,iblk))*ctime
-               enddo
+               if (restore_direct_trcrn) then
+                  aicen_old = aicen(i,j,n,iblk)
+                  vsnon_old = vsnon(i,j,n,iblk)
+                  aicen_new = aicen(i,j,n,iblk) &
+                     + (aicen_rest(i,j,n,iblk)-aicen(i,j,n,iblk))*ctime
+                  aicen(i,j,n,iblk) = aicen_new
+                  if (aicen_rest(i,j,n,iblk) > puny) then
+                     hicen_target = vicen_rest(i,j,n,iblk) / aicen_rest(i,j,n,iblk)
+                     hsnon_target = vsnon_rest(i,j,n,iblk) / aicen_rest(i,j,n,iblk)
+                     vicen(i,j,n,iblk) = max(aicen_new,c0) * hicen_target
+                     vsnon(i,j,n,iblk) = max(aicen_new,c0) * hsnon_target
+                  else
+                     vicen(i,j,n,iblk) = vicen(i,j,n,iblk) &
+                        + (vicen_rest(i,j,n,iblk)-vicen(i,j,n,iblk))*ctime
+                     vsnon(i,j,n,iblk) = vsnon(i,j,n,iblk) &
+                        + (vsnon_rest(i,j,n,iblk)-vsnon(i,j,n,iblk))*ctime
+                  endif
+                  do nt = 1, ntrcr
+                     trcrn(i,j,nt,n,iblk) = trcrn(i,j,nt,n,iblk) &
+                        + (trcrn_rest(i,j,nt,n,iblk)-trcrn(i,j,nt,n,iblk))*ctime
+                  enddo
+                  if ((aicen_old <= puny .and. aicen_rest(i,j,n,iblk) > puny) .or. &
+                      (vsnon_old <= puny .and. vsnon_rest(i,j,n,iblk) > puny)) then
+                     trcrn(i,j,:,n,iblk) = trcrn_rest(i,j,:,n,iblk)
+                  endif
+               else
+                  aicen(i,j,n,iblk) = aicen(i,j,n,iblk) &
+                     + (aicen_rest(i,j,n,iblk)-aicen(i,j,n,iblk))*ctime
+                  vicen(i,j,n,iblk) = vicen(i,j,n,iblk) &
+                     + (vicen_rest(i,j,n,iblk)-vicen(i,j,n,iblk))*ctime
+                  vsnon(i,j,n,iblk) = vsnon(i,j,n,iblk) &
+                     + (vsnon_rest(i,j,n,iblk)-vsnon(i,j,n,iblk))*ctime
+                  do nt = 1, ntrcr
+                     trcrn(i,j,nt,n,iblk) = trcrn(i,j,nt,n,iblk) &
+                        + (trcrn_rest(i,j,nt,n,iblk)-trcrn(i,j,nt,n,iblk))*ctime
+                  enddo
+               endif
             enddo
             enddo
             enddo
-         endif
       endif
 
    enddo ! iblk
@@ -736,5 +1173,3 @@
 !=======================================================================
 
       end module ice_restoring
-
-!=======================================================================
