@@ -1,0 +1,8 @@
+__pycache__/
+cases/
+inputs/
+runs/
+analysis/*.json
+analysis/*.txt
+analysis/figures/
+analysis_attempt*/

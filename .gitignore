@@ -7,6 +7,14 @@ doc/build
 
 # Ignore macOS cache files
 .DS_Store
+__pycache__/
+
+# Local P-SKRIPS integration-test artifacts.  Keep the generators and
+# reproducible parent_nest workflow, but not generated cases, fixtures,
+# builds, logs, histories, or restarts.
+/cice-tests/fixtures/
+/cice-tests/runs/
+/cice-tests/pskrips_bc_*/
 
 
 # Ignore testsuite file/directories
