@@ -602,6 +602,22 @@
             call ice_HaloUpdate (ty,               halo_info, &
                                  field_loc_center, field_type_vector)
          endif
+
+         ! The one-cell remap setup constructs these scheme-internal fields
+         ! only on physical cells.  Halo exchange supplies them at internal
+         ! block boundaries, but deliberately leaves open regional boundaries
+         ! unchanged.  Reconstruct those outer halos from the prescribed
+         ! physical state and velocity fields instead of adding remap-specific
+         ! quantities to the external boundary-data interface.
+         call reconstruct_prescribed_remap_halos &
+                              (dt,              ntrace, &
+                               uvel,           vvel,   &
+                               mm,             tm,     &
+                               dpx,            dpy,    &
+                               mc,             mx,     &
+                               my,             tc,     &
+                               tx,             ty)
+
          call ice_timer_stop(timer_bound)
 
       endif  ! nghost
@@ -829,6 +845,138 @@
 !TILL      !$OMP END PARALLEL DO
 
       end subroutine horizontal_remap
+
+!=======================================================================
+!
+! Reconstruct remap-only fields in prescribed open-boundary halos.
+!
+! The external interface supplies physical state and velocity fields.  With
+! nghost=1 there is no additional exterior stencil from which to form a
+! limited spatial gradient or a corrected midpoint velocity.  Use the
+! consistent first-order reconstruction in the outer halo: cell means are
+! the prescribed physical values, subcell gradients are zero, and departure
+! points use the prescribed velocity at the corner.  Interior cells retain
+! the native second-order remap reconstruction.
+!
+
+      subroutine reconstruct_prescribed_remap_halos &
+                              (dt,              ntrace, &
+                               uvel,           vvel,   &
+                               mm,             tm,     &
+                               dpx,            dpy,    &
+                               mc,             mx,     &
+                               my,             tc,     &
+                               tx,             ty)
+
+      use ice_blocks, only: block, get_block, nblocks_x, nblocks_y
+      use ice_domain, only: nblocks, blocks_ice, &
+                            ew_boundary_type, ns_boundary_type
+      use ice_forcing, only: restore_ice_use_west,  restore_ice_use_east, &
+                             restore_ice_use_south, restore_ice_use_north
+      use ice_restore_forcing, only: restore_forcing_is_active
+
+      real (kind=dbl_kind), intent(in) :: &
+         dt
+
+      integer (kind=int_kind), intent(in) :: &
+         ntrace
+
+      real (kind=dbl_kind), intent(in), dimension(nx_block,ny_block,max_blocks) :: &
+         uvel, vvel
+
+      real (kind=dbl_kind), intent(in), dimension(nx_block,ny_block,0:ncat,max_blocks) :: &
+         mm
+
+      real (kind=dbl_kind), intent(in), &
+         dimension(nx_block,ny_block,ntrace,ncat,max_blocks) :: tm
+
+      real (kind=dbl_kind), intent(inout), dimension(nx_block,ny_block,max_blocks) :: &
+         dpx, dpy
+
+      real (kind=dbl_kind), intent(inout), &
+         dimension(nx_block,ny_block,0:ncat,max_blocks) :: mc, mx, my
+
+      real (kind=dbl_kind), intent(inout), &
+         dimension(nx_block,ny_block,ntrace,ncat,max_blocks) :: tc, tx, ty
+
+      integer (kind=int_kind) :: &
+         iblk, i, j, n, m, ilo, ihi, jlo, jhi
+
+      type (block) :: &
+         this_block
+
+      if (.not. restore_forcing_is_active()) return
+
+      do iblk = 1, nblocks
+         this_block = get_block(blocks_ice(iblk),iblk)
+         ilo = this_block%ilo
+         ihi = this_block%ihi
+         jlo = this_block%jlo
+         jhi = this_block%jhi
+
+         if (restore_ice_use_west .and. ew_boundary_type == 'open' .and. &
+             this_block%iblock == 1) then
+            do j = 1, ny_block
+            do i = 1, ilo-1
+               call set_remap_halo_cell(i,j,iblk)
+            enddo
+            enddo
+         endif
+
+         if (restore_ice_use_east .and. ew_boundary_type == 'open' .and. &
+             this_block%iblock == nblocks_x) then
+            do j = 1, ny_block
+            do i = ihi+1, nx_block
+               call set_remap_halo_cell(i,j,iblk)
+            enddo
+            enddo
+         endif
+
+         if (restore_ice_use_south .and. ns_boundary_type == 'open' .and. &
+             this_block%jblock == 1) then
+            do j = 1, jlo-1
+            do i = 1, nx_block
+               call set_remap_halo_cell(i,j,iblk)
+            enddo
+            enddo
+         endif
+
+         if (restore_ice_use_north .and. ns_boundary_type == 'open' .and. &
+             this_block%jblock == nblocks_y) then
+            do j = jhi+1, ny_block
+            do i = 1, nx_block
+               call set_remap_halo_cell(i,j,iblk)
+            enddo
+            enddo
+         endif
+      enddo
+
+      contains
+
+      subroutine set_remap_halo_cell(i,j,iblk)
+
+      integer (kind=int_kind), intent(in) :: i, j, iblk
+
+      dpx(i,j,iblk) = -dt*uvel(i,j,iblk)
+      dpy(i,j,iblk) = -dt*vvel(i,j,iblk)
+
+      do n = 0, ncat
+         mc(i,j,n,iblk) = mm(i,j,n,iblk)
+         mx(i,j,n,iblk) = c0
+         my(i,j,n,iblk) = c0
+      enddo
+
+      do n = 1, ncat
+      do m = 1, ntrace
+         tc(i,j,m,n,iblk) = tm(i,j,m,n,iblk)
+         tx(i,j,m,n,iblk) = c0
+         ty(i,j,m,n,iblk) = c0
+      enddo
+      enddo
+
+      end subroutine set_remap_halo_cell
+
+      end subroutine reconstruct_prescribed_remap_halos
 
 !=======================================================================
 !

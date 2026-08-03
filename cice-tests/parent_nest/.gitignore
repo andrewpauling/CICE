@@ -6,3 +6,4 @@ analysis/*.json
 analysis/*.txt
 analysis/figures/
 analysis_attempt*/
+attempts/
