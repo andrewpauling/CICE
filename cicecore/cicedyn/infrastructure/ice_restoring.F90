@@ -913,8 +913,9 @@
 
 !  This subroutine is intended for restoring the ice state to desired
 !  values in cells surrounding the grid.
-!  Note: This routine will need to be modified for nghost > 1.
-!        We assume padding occurs only on east and north edges.
+!  Exterior strips use the actual block bounds and therefore support
+!  every ghost width supported by the surrounding CICE configuration.
+!  We assume padding occurs only on east and north edges.
 
  subroutine ice_HaloRestore
 

@@ -261,6 +261,10 @@
           uvel, vvel, bound_state, uvelE, vvelN
       use ice_grid, only: tarea, grid_ice
       use ice_calendar, only: istep1
+      use ice_restoring, only: restore_ice, ice_HaloRestore_apply_halo
+#ifdef RESTORE_DIAGNOSTICS
+      use ice_restoring, only: ice_HaloRestore_post_halo_diagnostics
+#endif
       use ice_timers, only: ice_timer_start, ice_timer_stop, &
           timer_advect, timer_bound
       use ice_transport_remap, only: horizontal_remap, make_masks
@@ -393,6 +397,9 @@
 !                           field_loc_NEcorner, field_type_vector)
 !      call ice_timer_stop(timer_bound)
 
+#ifdef RESTORE_DIAGNOSTICS
+      if (restore_ice) call ice_HaloRestore_post_halo_diagnostics('pre_transport_remap')
+#endif
 
       !$OMP PARALLEL DO PRIVATE(iblk) SCHEDULE(runtime)
       do iblk = 1, nblocks
@@ -578,6 +585,10 @@
       call bound_state (aicen,        &
                         vicen, vsnon, &
                         ntrcr, trcrn)
+      if (restore_ice) call ice_HaloRestore_apply_halo
+#ifdef RESTORE_DIAGNOSTICS
+      if (restore_ice) call ice_HaloRestore_post_halo_diagnostics('post_transport_remap_bound_state')
+#endif
 
       call ice_timer_stop(timer_bound)
 
@@ -715,6 +726,10 @@
           n_trcr_strata, nt_strata, uvelE, vvelN
       use ice_flux, only: Tf
       use ice_grid, only: HTE, HTN, tarea, tmask, grid_ice
+      use ice_restoring, only: restore_ice, ice_HaloRestore_apply_halo
+#ifdef RESTORE_DIAGNOSTICS
+      use ice_restoring, only: ice_HaloRestore_post_halo_diagnostics
+#endif
       use ice_timers, only: ice_timer_start, ice_timer_stop, &
           timer_bound, timer_advect
 
@@ -800,6 +815,10 @@
          call ice_timer_stop(timer_bound)
       endif
 
+#ifdef RESTORE_DIAGNOSTICS
+      if (restore_ice) call ice_HaloRestore_post_halo_diagnostics('pre_transport_upwind')
+#endif
+
       !$OMP PARALLEL DO PRIVATE(iblk,ilo,ihi,jlo,jhi,this_block) SCHEDULE(runtime)
       do iblk = 1, nblocks
          this_block = get_block(blocks_ice(iblk),iblk)
@@ -858,6 +877,10 @@
       call bound_state (aicen,        &
                         vicen, vsnon, &
                         ntrcr, trcrn)
+      if (restore_ice) call ice_HaloRestore_apply_halo
+#ifdef RESTORE_DIAGNOSTICS
+      if (restore_ice) call ice_HaloRestore_post_halo_diagnostics('post_transport_upwind_bound_state')
+#endif
 
       call ice_timer_stop(timer_bound)
 
