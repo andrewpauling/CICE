@@ -288,7 +288,6 @@
                                                          Tsfc_rest, Tinz_rest, Sinz_rest)
 
             call restore_forcing_extend_open_edges(aicen_rest, vicen_rest, vsnon_rest, trcrn_rest)
-            call restore_forcing_disable_selected_edges(aicen_rest, vicen_rest, vsnon_rest, trcrn_rest)
             call restore_forcing_apply_land_mask(aicen_rest, vicen_rest, vsnon_rest, trcrn_rest)
             if (restore_forcing_has_bc_thermo .and. present(Tsfc_rest) .and. present(Tinz_rest) .and. present(Sinz_rest)) then
                   call restore_forcing_extend_open_edges_bc(Tsfc_rest, Tinz_rest, Sinz_rest)
@@ -1290,12 +1289,20 @@
                   aicen_rest, vicen_rest, vsnon_rest
             real (kind=dbl_kind), dimension (:,:,:,:,:), intent(inout) :: trcrn_rest
 
-            integer (kind=int_kind) :: i, j, n, nt
+            integer (kind=int_kind) :: i, j, n, nt, imask, jmask
 
             do n = 1, ncat
                   do j = j1, j2
                         do i = i1, i2
-                              if (hm(i,j,iblk) <= c0) then
+                              ! Exterior ghost cells carry hm=0 on regional grids.
+                              ! Apply the mask from the nearest physical cell so an
+                              ! open-ocean boundary target survives extension into
+                              ! the halo, while coastal land targets remain zero.
+                              imask = min(max(i, restore_forcing_ilo(iblk)), &
+                                          restore_forcing_ihi(iblk))
+                              jmask = min(max(j, restore_forcing_jlo(iblk)), &
+                                          restore_forcing_jhi(iblk))
+                              if (hm(imask,jmask,iblk) <= c0) then
                                     aicen_rest(i,j,n,iblk) = c0
                                     vicen_rest(i,j,n,iblk) = c0
                                     vsnon_rest(i,j,n,iblk) = c0
@@ -1350,12 +1357,18 @@
             real (kind=dbl_kind), dimension (:,:,:,:), intent(inout) :: Tsfc_rest
             real (kind=dbl_kind), dimension (:,:,:,:,:), intent(inout) :: Tinz_rest, Sinz_rest
 
-            integer (kind=int_kind) :: i, j, n, k
+            integer (kind=int_kind) :: i, j, n, k, imask, jmask
 
             do n = 1, ncat
                   do j = j1, j2
                         do i = i1, i2
-                              if (hm(i,j,iblk) <= c0) then
+                              ! Use the adjacent physical-cell mask for exterior
+                              ! ghosts; regional-grid ghost masks are zero by design.
+                              imask = min(max(i, restore_forcing_ilo(iblk)), &
+                                          restore_forcing_ihi(iblk))
+                              jmask = min(max(j, restore_forcing_jlo(iblk)), &
+                                          restore_forcing_jhi(iblk))
+                              if (hm(imask,jmask,iblk) <= c0) then
                                     Tsfc_rest(i,j,n,iblk) = c0
                                     do k = 1, nilyr
                                           Tinz_rest(i,j,k,n,iblk) = c0

@@ -785,6 +785,7 @@
                            aice,  trcr,  vice,  vsno, aice0, trcr_depend, &
                            bound_state, trcr_base, nt_strata, n_trcr_strata
       use ice_flux,  only: Tf
+      use ice_restoring, only: restore_ice, ice_HaloRestore_apply_halo
       use ice_timers, only: ice_timer_start, ice_timer_stop, timer_bound, timer_updstate
 
       real (kind=dbl_kind), intent(in) :: &
@@ -826,6 +827,7 @@
       call bound_state (aicen,        &
                         vicen, vsnon, &
                         ntrcr, trcrn)
+      if (restore_ice) call ice_HaloRestore_apply_halo
       call ice_timer_stop(timer_bound)
 
       !$OMP PARALLEL DO PRIVATE(iblk,i,j) SCHEDULE(runtime)

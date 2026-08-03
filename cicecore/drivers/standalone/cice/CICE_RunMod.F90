@@ -157,6 +157,9 @@
           write_restart_snow
       use ice_restart_driver, only: dumpfile
       use ice_restoring, only: restore_ice, ice_HaloRestore
+#ifdef RESTORE_DIAGNOSTICS
+      use ice_restoring, only: ice_HaloRestore_post_halo_diagnostics
+#endif
       use ice_step_mod, only: prep_radiation, step_therm1, step_therm2, &
           update_state, step_dyn_horiz, step_dyn_ridge, step_radiation, &
           biogeochemistry, step_prep, step_dyn_wave, step_snow
@@ -268,6 +271,9 @@
          offset = dt
          call update_state (dt=dt, daidt=daidtt, dvidt=dvidtt, dvsdt=dvsdtt, &
                             dagedt=dagedtt, offset=offset)
+#ifdef RESTORE_DIAGNOSTICS
+         if (restore_ice) call ice_HaloRestore_post_halo_diagnostics('post_thermo_bound_state')
+#endif
 
          call ice_timer_stop(timer_thermo) ! thermodynamics
          call ice_timer_stop(timer_column) ! column physics
@@ -310,6 +316,9 @@
             offset = c0
             call update_state (dt=dt_dyn, daidt=daidtd, dvidt=dvidtd, dvsdt=dvsdtd, &
                                dagedt=dagedtd, offset=offset)
+#ifdef RESTORE_DIAGNOSTICS
+            if (restore_ice) call ice_HaloRestore_post_halo_diagnostics('post_dyn_bound_state')
+#endif
 
          enddo
 

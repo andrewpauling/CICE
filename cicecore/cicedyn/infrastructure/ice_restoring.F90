@@ -28,7 +28,10 @@
 
       implicit none
       private
-      public :: ice_HaloRestore_init, ice_HaloRestore
+      public :: ice_HaloRestore_init, ice_HaloRestore, ice_HaloRestore_apply_halo
+#ifdef RESTORE_DIAGNOSTICS
+      public :: ice_HaloRestore_post_halo_diagnostics
+#endif
 
       logical (kind=log_kind), public :: &
          restore_ice                 ! restore ice state if true
@@ -73,6 +76,12 @@
       logical (kind=log_kind), dimension(:), allocatable :: &
          restore_cached_west_block, restore_cached_east_block, &
          restore_cached_south_block, restore_cached_north_block
+
+#ifdef RESTORE_DIAGNOSTICS
+      real (kind=dbl_kind), allocatable :: &
+         aicen_restore_diag(:,:,:,:), vicen_restore_diag(:,:,:,:), &
+         vsnon_restore_diag(:,:,:,:), trcrn_restore_diag(:,:,:,:,:)
+#endif
 
 !=======================================================================
 
@@ -316,22 +325,27 @@
       ! Impose land mask
       !-----------------------------------------------------------------
 
-   do iblk = 1, nblocks
-      do n = 1, ncat
-         do j = 1, ny_block
-         do i = 1, nx_block
-               if (hm(i,j,iblk) <= c0) then
-                  aicen_rest(i,j,n,iblk) = c0
-                  vicen_rest(i,j,n,iblk) = c0
-                  vsnon_rest(i,j,n,iblk) = c0
-                  do nt = 1, ntrcr
-                     trcrn_rest(i,j,nt,n,iblk) = c0
-                  enddo
-               endif
-         enddo
+   ! Time-varying forcing applies its own regional mask, including projection
+   ! from exterior ghosts to the adjacent physical edge.  The legacy hm mask
+   ! would otherwise erase those prepared ghost targets during initialization.
+   if (.not. restore_forcing_is_active()) then
+      do iblk = 1, nblocks
+         do n = 1, ncat
+            do j = 1, ny_block
+            do i = 1, nx_block
+                  if (hm(i,j,iblk) <= c0) then
+                     aicen_rest(i,j,n,iblk) = c0
+                     vicen_rest(i,j,n,iblk) = c0
+                     vsnon_rest(i,j,n,iblk) = c0
+                     do nt = 1, ntrcr
+                        trcrn_rest(i,j,nt,n,iblk) = c0
+                     enddo
+                  endif
+            enddo
+            enddo
          enddo
       enddo
-   enddo
+   endif
 
    if (restore_forcing_is_active() .and. .not. restart_ext) then
       do iblk = 1, nblocks
@@ -341,7 +355,8 @@
          jlo = this_block%jlo
          jhi = this_block%jhi
 
-         if (this_block%iblock == 1 .and. trim(ew_boundary_type) /= 'cyclic') then
+         if (restore_ice_use_west .and. this_block%iblock == 1 .and. &
+             trim(ew_boundary_type) /= 'cyclic') then
             do n = 1, ncat
             do j = 1, ny_block
             do i = 1, ilo - 1
@@ -356,7 +371,8 @@
             enddo
          endif
 
-         if (this_block%iblock == nblocks_x .and. trim(ew_boundary_type) /= 'cyclic') then
+         if (restore_ice_use_east .and. this_block%iblock == nblocks_x .and. &
+             trim(ew_boundary_type) /= 'cyclic') then
             ibc = nx_block
             do i = nx_block, 1, -1
                npad = 0
@@ -382,7 +398,8 @@
             enddo
          endif
 
-         if (this_block%jblock == 1 .and. trim(ns_boundary_type) /= 'cyclic') then
+         if (restore_ice_use_south .and. this_block%jblock == 1 .and. &
+             trim(ns_boundary_type) /= 'cyclic') then
             do n = 1, ncat
             do j = 1, jlo - 1
             do i = 1, nx_block
@@ -397,7 +414,8 @@
             enddo
          endif
 
-         if (this_block%jblock == nblocks_y .and. trim(ns_boundary_type) /= 'cyclic' .and. &
+         if (restore_ice_use_north .and. this_block%jblock == nblocks_y .and. &
+             trim(ns_boundary_type) /= 'cyclic' .and. &
              trim(ns_boundary_type) /= 'tripole' .and. trim(ns_boundary_type) /= 'tripoleT') then
             ibc = ny_block
             do j = ny_block, 1, -1
@@ -929,6 +947,17 @@
           restore_without_trcrn, &
           restore_direct_trcrn
 
+#ifdef RESTORE_DIAGNOSTICS
+   real (dbl_kind), allocatable :: &
+      aicen_before(:,:,:,:), vicen_before(:,:,:,:), vsnon_before(:,:,:,:), &
+      trcrn_before(:,:,:,:,:)
+
+   allocate(aicen_before, source=aicen)
+   allocate(vicen_before, source=vicen)
+   allocate(vsnon_before, source=vsnon)
+   allocate(trcrn_before, source=trcrn)
+#endif
+
    call ice_timer_start(timer_bound)
    secday = restore_cached_secday
    puny = restore_cached_puny
@@ -975,10 +1004,13 @@
          jlo = restore_cached_jlo(iblk)
          jhi = restore_cached_jhi(iblk)
 
-      if (restore_cached_west_block(iblk)) then     ! west edge
+      if (restore_ice_use_west .and. restore_cached_west_block(iblk)) then     ! west edge
             do n = 1, ncat
             do j = 1, ny_block
-            do i = 1, merge(ilo - 1, ilo, restore_without_trcrn)
+            ! Physical-edge restoring is distinct from exact prescribed halos.
+            ! structure_only has no physical-edge tracer/thermo target, so its
+            ! interior-restoring range is empty.
+            do i = ilo, merge(ilo - 1, ilo, restore_without_trcrn)
                if (restore_direct_trcrn) then
                   aicen_old = aicen(i,j,n,iblk)
                   vsnon_old = vsnon(i,j,n,iblk)
@@ -1021,12 +1053,12 @@
             enddo
       endif
 
-      if (restore_cached_east_block(iblk)) then     ! east edge
+      if (restore_ice_use_east .and. restore_cached_east_block(iblk)) then     ! east edge
             ibc = restore_cached_east_bc(iblk)
 
             do n = 1, ncat
             do j = 1, ny_block
-            do i = merge(ihi + 1, ihi, restore_without_trcrn), ibc
+            do i = merge(ihi + 1, ihi, restore_without_trcrn), ihi
                if (restore_direct_trcrn) then
                   aicen_old = aicen(i,j,n,iblk)
                   vsnon_old = vsnon(i,j,n,iblk)
@@ -1069,9 +1101,9 @@
             enddo
       endif
 
-      if (restore_cached_south_block(iblk)) then    ! south edge
+      if (restore_ice_use_south .and. restore_cached_south_block(iblk)) then    ! south edge
             do n = 1, ncat
-            do j = 1, merge(jlo - 1, jlo, restore_without_trcrn)
+            do j = jlo, merge(jlo - 1, jlo, restore_without_trcrn)
             do i = 1, nx_block
                if (restore_direct_trcrn) then
                   aicen_old = aicen(i,j,n,iblk)
@@ -1115,11 +1147,11 @@
             enddo
       endif
 
-      if (restore_cached_north_block(iblk)) then    ! north edge
+      if (restore_ice_use_north .and. restore_cached_north_block(iblk)) then    ! north edge
             ibc = restore_cached_north_bc(iblk)
 
             do n = 1, ncat
-            do j = merge(jhi + 1, jhi, restore_without_trcrn), ibc
+            do j = merge(jhi + 1, jhi, restore_without_trcrn), jhi
             do i = 1, nx_block
                if (restore_direct_trcrn) then
                   aicen_old = aicen(i,j,n,iblk)
@@ -1166,9 +1198,510 @@
    enddo ! iblk
    !$OMP END PARALLEL DO
 
+   ! Exterior boundary values are prescribed conditions, not a sponge.
+   ! Assign them exactly after the independently configured physical-edge
+   ! relaxation and repeat this assignment after later bound_state exchanges.
+   call ice_HaloRestore_apply_halo
+
+#ifdef RESTORE_DIAGNOSTICS
+   call ice_HaloRestore_diagnostics(aicen_before, vicen_before, vsnon_before, trcrn_before)
+   if (allocated(aicen_restore_diag)) then
+      deallocate(aicen_restore_diag, vicen_restore_diag, vsnon_restore_diag, trcrn_restore_diag)
+   endif
+   allocate(aicen_restore_diag, source=aicen)
+   allocate(vicen_restore_diag, source=vicen)
+   allocate(vsnon_restore_diag, source=vsnon)
+   allocate(trcrn_restore_diag, source=trcrn)
+   deallocate(aicen_before, vicen_before, vsnon_before, trcrn_before)
+#endif
+
    call ice_timer_stop(timer_bound)
 
  end subroutine ice_HaloRestore
+
+!=======================================================================
+
+ subroutine ice_HaloRestore_apply_halo
+
+   use ice_domain, only: nblocks
+
+   integer (int_kind) :: iblk, i, j, n, nt
+   integer (int_kind) :: ilo, ihi, jlo, jhi, ibc
+
+   if (.not. restore_forcing_is_active()) return
+   if (.not. allocated(aicen_rest)) return
+
+   !$OMP PARALLEL DO PRIVATE(iblk,ilo,ihi,jlo,jhi,ibc,i,j,n,nt)
+   do iblk = 1, nblocks
+      ilo = restore_cached_ilo(iblk)
+      ihi = restore_cached_ihi(iblk)
+      jlo = restore_cached_jlo(iblk)
+      jhi = restore_cached_jhi(iblk)
+
+      if (restore_ice_use_west .and. restore_cached_west_block(iblk)) then
+         do n = 1, ncat
+         do j = 1, ny_block
+         do i = 1, ilo - 1
+            aicen(i,j,n,iblk) = aicen_rest(i,j,n,iblk)
+            vicen(i,j,n,iblk) = vicen_rest(i,j,n,iblk)
+            vsnon(i,j,n,iblk) = vsnon_rest(i,j,n,iblk)
+            do nt = 1, restore_cached_ntrcr
+               trcrn(i,j,nt,n,iblk) = trcrn_rest(i,j,nt,n,iblk)
+            enddo
+         enddo
+         enddo
+         enddo
+      endif
+
+      if (restore_ice_use_east .and. restore_cached_east_block(iblk)) then
+         ibc = restore_cached_east_bc(iblk)
+         do n = 1, ncat
+         do j = 1, ny_block
+         do i = ihi + 1, ibc
+            aicen(i,j,n,iblk) = aicen_rest(i,j,n,iblk)
+            vicen(i,j,n,iblk) = vicen_rest(i,j,n,iblk)
+            vsnon(i,j,n,iblk) = vsnon_rest(i,j,n,iblk)
+            do nt = 1, restore_cached_ntrcr
+               trcrn(i,j,nt,n,iblk) = trcrn_rest(i,j,nt,n,iblk)
+            enddo
+         enddo
+         enddo
+         enddo
+      endif
+
+      if (restore_ice_use_south .and. restore_cached_south_block(iblk)) then
+         do n = 1, ncat
+         do j = 1, jlo - 1
+         do i = 1, nx_block
+            aicen(i,j,n,iblk) = aicen_rest(i,j,n,iblk)
+            vicen(i,j,n,iblk) = vicen_rest(i,j,n,iblk)
+            vsnon(i,j,n,iblk) = vsnon_rest(i,j,n,iblk)
+            do nt = 1, restore_cached_ntrcr
+               trcrn(i,j,nt,n,iblk) = trcrn_rest(i,j,nt,n,iblk)
+            enddo
+         enddo
+         enddo
+         enddo
+      endif
+
+      if (restore_ice_use_north .and. restore_cached_north_block(iblk)) then
+         ibc = restore_cached_north_bc(iblk)
+         do n = 1, ncat
+         do j = jhi + 1, ibc
+         do i = 1, nx_block
+            aicen(i,j,n,iblk) = aicen_rest(i,j,n,iblk)
+            vicen(i,j,n,iblk) = vicen_rest(i,j,n,iblk)
+            vsnon(i,j,n,iblk) = vsnon_rest(i,j,n,iblk)
+            do nt = 1, restore_cached_ntrcr
+               trcrn(i,j,nt,n,iblk) = trcrn_rest(i,j,nt,n,iblk)
+            enddo
+         enddo
+         enddo
+         enddo
+      endif
+   enddo
+   !$OMP END PARALLEL DO
+
+ end subroutine ice_HaloRestore_apply_halo
+
+!=======================================================================
+
+#ifdef RESTORE_DIAGNOSTICS
+ subroutine ice_HaloRestore_diagnostics(aicen_before, vicen_before, vsnon_before, trcrn_before)
+
+   use ice_communicate, only: my_task, master_task
+   use ice_domain, only: nblocks, distrb_info
+   use ice_global_reductions, only: global_maxval, global_sum
+   use ice_grid, only: hm
+
+   real (dbl_kind), dimension(:,:,:,:), intent(in) :: &
+      aicen_before, vicen_before, vsnon_before
+   real (dbl_kind), dimension(:,:,:,:,:), intent(in) :: trcrn_before
+
+   integer (int_kind), parameter :: nedge = 4
+   character(len=5), parameter :: edge_name(nedge) = &
+      [character(len=5) :: 'west', 'east', 'south', 'north']
+   logical (log_kind) :: edge_enabled(nedge)
+   integer (int_kind) :: edge, iblk, i, j, n, nt, ilo, ihi, jlo, jhi, ibc
+   integer (int_kind) :: i1, i2, j1, j2
+   integer (int_kind) :: changed_local(nedge), changed_global(nedge)
+   real (dbl_kind) :: edge_delta_local(nedge), edge_delta_global(nedge)
+   real (dbl_kind) :: boundary_delta_local(nedge), boundary_delta_global(nedge)
+   real (dbl_kind) :: boundary_struct_local(nedge), boundary_struct_global(nedge)
+   real (dbl_kind) :: boundary_tracer_local(nedge), boundary_tracer_global(nedge)
+   real (dbl_kind) :: extension_error_local(nedge), extension_error_global(nedge)
+   real (dbl_kind) :: ghost_before_local(nedge), ghost_before_global(nedge)
+   real (dbl_kind) :: ghost_after_local(nedge), ghost_after_global(nedge)
+   real (dbl_kind) :: ghost_target_local(nedge), ghost_target_global(nedge)
+   integer (int_kind) :: wet_ghost_local(nedge), wet_ghost_global(nedge)
+   real (dbl_kind) :: physical_delta_local, physical_delta_global
+   real (dbl_kind) :: interior_delta_local, interior_delta_global
+   real (dbl_kind) :: land_state_local, land_state_global
+   real (dbl_kind) :: expected_value
+
+   edge_enabled = [restore_ice_use_west, restore_ice_use_east, &
+                   restore_ice_use_south, restore_ice_use_north]
+   changed_local = 0
+   edge_delta_local = c0
+   boundary_delta_local = c0
+   boundary_struct_local = c0
+   boundary_tracer_local = c0
+   extension_error_local = c0
+   ghost_before_local = c0
+   ghost_after_local = c0
+   ghost_target_local = c0
+   wet_ghost_local = 0
+   physical_delta_local = c0
+   interior_delta_local = c0
+   land_state_local = c0
+
+   do iblk = 1, nblocks
+      ilo = restore_cached_ilo(iblk)
+      ihi = restore_cached_ihi(iblk)
+      jlo = restore_cached_jlo(iblk)
+      jhi = restore_cached_jhi(iblk)
+
+      physical_delta_local = max(physical_delta_local, &
+         maxval(abs(aicen(ilo:ihi,jlo:jhi,:,iblk) - aicen_before(ilo:ihi,jlo:jhi,:,iblk))), &
+         maxval(abs(vicen(ilo:ihi,jlo:jhi,:,iblk) - vicen_before(ilo:ihi,jlo:jhi,:,iblk))), &
+         maxval(abs(vsnon(ilo:ihi,jlo:jhi,:,iblk) - vsnon_before(ilo:ihi,jlo:jhi,:,iblk))), &
+         maxval(abs(trcrn(ilo:ihi,jlo:jhi,:,:,iblk) - trcrn_before(ilo:ihi,jlo:jhi,:,:,iblk))))
+
+      do j = jlo, jhi
+         do i = ilo, ihi
+            if (restore_cached_west_block(iblk) .and. i == ilo) cycle
+            if (restore_cached_east_block(iblk) .and. i == ihi) cycle
+            if (restore_cached_south_block(iblk) .and. j == jlo) cycle
+            if (restore_cached_north_block(iblk) .and. j == jhi) cycle
+            interior_delta_local = max(interior_delta_local, &
+               maxval(abs(aicen(i,j,:,iblk) - aicen_before(i,j,:,iblk))), &
+               maxval(abs(vicen(i,j,:,iblk) - vicen_before(i,j,:,iblk))), &
+               maxval(abs(vsnon(i,j,:,iblk) - vsnon_before(i,j,:,iblk))), &
+               maxval(abs(trcrn(i,j,:,:,iblk) - trcrn_before(i,j,:,:,iblk))))
+         enddo
+      enddo
+
+      do j = jlo, jhi
+         do i = ilo, ihi
+            if (hm(i,j,iblk) <= c0) then
+               land_state_local = max(land_state_local, maxval(abs(aicen(i,j,:,iblk))), &
+                  maxval(abs(vicen(i,j,:,iblk))), maxval(abs(vsnon(i,j,:,iblk))))
+            endif
+         enddo
+      enddo
+
+      do edge = 1, nedge
+         if (edge == 1 .and. .not. restore_cached_west_block(iblk)) cycle
+         if (edge == 2 .and. .not. restore_cached_east_block(iblk)) cycle
+         if (edge == 3 .and. .not. restore_cached_south_block(iblk)) cycle
+         if (edge == 4 .and. .not. restore_cached_north_block(iblk)) cycle
+
+         select case (edge)
+         case (1)
+            i1 = 1; i2 = ilo - 1; j1 = jlo; j2 = jhi
+            boundary_delta_local(edge) = max(boundary_delta_local(edge), &
+               maxval(abs(aicen(ilo,jlo:jhi,:,iblk) - aicen_before(ilo,jlo:jhi,:,iblk))), &
+               maxval(abs(vicen(ilo,jlo:jhi,:,iblk) - vicen_before(ilo,jlo:jhi,:,iblk))), &
+               maxval(abs(vsnon(ilo,jlo:jhi,:,iblk) - vsnon_before(ilo,jlo:jhi,:,iblk))), &
+               maxval(abs(trcrn(ilo,jlo:jhi,:,:,iblk) - trcrn_before(ilo,jlo:jhi,:,:,iblk))))
+            boundary_struct_local(edge) = max(boundary_struct_local(edge), &
+               maxval(abs(aicen(ilo,jlo:jhi,:,iblk) - aicen_before(ilo,jlo:jhi,:,iblk))), &
+               maxval(abs(vicen(ilo,jlo:jhi,:,iblk) - vicen_before(ilo,jlo:jhi,:,iblk))), &
+               maxval(abs(vsnon(ilo,jlo:jhi,:,iblk) - vsnon_before(ilo,jlo:jhi,:,iblk))))
+            boundary_tracer_local(edge) = max(boundary_tracer_local(edge), &
+               maxval(abs(trcrn(ilo,jlo:jhi,:,:,iblk) - trcrn_before(ilo,jlo:jhi,:,:,iblk))))
+         case (2)
+            ibc = restore_cached_east_bc(iblk)
+            i1 = ihi + 1; i2 = ibc; j1 = jlo; j2 = jhi
+            boundary_delta_local(edge) = max(boundary_delta_local(edge), &
+               maxval(abs(aicen(ihi,jlo:jhi,:,iblk) - aicen_before(ihi,jlo:jhi,:,iblk))), &
+               maxval(abs(vicen(ihi,jlo:jhi,:,iblk) - vicen_before(ihi,jlo:jhi,:,iblk))), &
+               maxval(abs(vsnon(ihi,jlo:jhi,:,iblk) - vsnon_before(ihi,jlo:jhi,:,iblk))), &
+               maxval(abs(trcrn(ihi,jlo:jhi,:,:,iblk) - trcrn_before(ihi,jlo:jhi,:,:,iblk))))
+            boundary_struct_local(edge) = max(boundary_struct_local(edge), &
+               maxval(abs(aicen(ihi,jlo:jhi,:,iblk) - aicen_before(ihi,jlo:jhi,:,iblk))), &
+               maxval(abs(vicen(ihi,jlo:jhi,:,iblk) - vicen_before(ihi,jlo:jhi,:,iblk))), &
+               maxval(abs(vsnon(ihi,jlo:jhi,:,iblk) - vsnon_before(ihi,jlo:jhi,:,iblk))))
+            boundary_tracer_local(edge) = max(boundary_tracer_local(edge), &
+               maxval(abs(trcrn(ihi,jlo:jhi,:,:,iblk) - trcrn_before(ihi,jlo:jhi,:,:,iblk))))
+         case (3)
+            i1 = ilo; i2 = ihi; j1 = 1; j2 = jlo - 1
+            boundary_delta_local(edge) = max(boundary_delta_local(edge), &
+               maxval(abs(aicen(ilo:ihi,jlo,:,iblk) - aicen_before(ilo:ihi,jlo,:,iblk))), &
+               maxval(abs(vicen(ilo:ihi,jlo,:,iblk) - vicen_before(ilo:ihi,jlo,:,iblk))), &
+               maxval(abs(vsnon(ilo:ihi,jlo,:,iblk) - vsnon_before(ilo:ihi,jlo,:,iblk))), &
+               maxval(abs(trcrn(ilo:ihi,jlo,:,:,iblk) - trcrn_before(ilo:ihi,jlo,:,:,iblk))))
+            boundary_struct_local(edge) = max(boundary_struct_local(edge), &
+               maxval(abs(aicen(ilo:ihi,jlo,:,iblk) - aicen_before(ilo:ihi,jlo,:,iblk))), &
+               maxval(abs(vicen(ilo:ihi,jlo,:,iblk) - vicen_before(ilo:ihi,jlo,:,iblk))), &
+               maxval(abs(vsnon(ilo:ihi,jlo,:,iblk) - vsnon_before(ilo:ihi,jlo,:,iblk))))
+            boundary_tracer_local(edge) = max(boundary_tracer_local(edge), &
+               maxval(abs(trcrn(ilo:ihi,jlo,:,:,iblk) - trcrn_before(ilo:ihi,jlo,:,:,iblk))))
+         case (4)
+            ibc = restore_cached_north_bc(iblk)
+            i1 = ilo; i2 = ihi; j1 = jhi + 1; j2 = ibc
+            boundary_delta_local(edge) = max(boundary_delta_local(edge), &
+               maxval(abs(aicen(ilo:ihi,jhi,:,iblk) - aicen_before(ilo:ihi,jhi,:,iblk))), &
+               maxval(abs(vicen(ilo:ihi,jhi,:,iblk) - vicen_before(ilo:ihi,jhi,:,iblk))), &
+               maxval(abs(vsnon(ilo:ihi,jhi,:,iblk) - vsnon_before(ilo:ihi,jhi,:,iblk))), &
+               maxval(abs(trcrn(ilo:ihi,jhi,:,:,iblk) - trcrn_before(ilo:ihi,jhi,:,:,iblk))))
+            boundary_struct_local(edge) = max(boundary_struct_local(edge), &
+               maxval(abs(aicen(ilo:ihi,jhi,:,iblk) - aicen_before(ilo:ihi,jhi,:,iblk))), &
+               maxval(abs(vicen(ilo:ihi,jhi,:,iblk) - vicen_before(ilo:ihi,jhi,:,iblk))), &
+               maxval(abs(vsnon(ilo:ihi,jhi,:,iblk) - vsnon_before(ilo:ihi,jhi,:,iblk))))
+            boundary_tracer_local(edge) = max(boundary_tracer_local(edge), &
+               maxval(abs(trcrn(ilo:ihi,jhi,:,:,iblk) - trcrn_before(ilo:ihi,jhi,:,:,iblk))))
+         end select
+
+         if (i2 < i1 .or. j2 < j1) cycle
+         select case (edge)
+         case (1)
+            do j = j1, j2
+               if (hm(ilo,j,iblk) > c0) &
+                  wet_ghost_local(edge) = wet_ghost_local(edge) + i2 - i1 + 1
+            enddo
+         case (2)
+            do j = j1, j2
+               if (hm(ihi,j,iblk) > c0) &
+                  wet_ghost_local(edge) = wet_ghost_local(edge) + i2 - i1 + 1
+            enddo
+         case (3)
+            do i = i1, i2
+               if (hm(i,jlo,iblk) > c0) &
+                  wet_ghost_local(edge) = wet_ghost_local(edge) + j2 - j1 + 1
+            enddo
+         case (4)
+            do i = i1, i2
+               if (hm(i,jhi,iblk) > c0) &
+                  wet_ghost_local(edge) = wet_ghost_local(edge) + j2 - j1 + 1
+            enddo
+         end select
+         ghost_before_local(edge) = max(ghost_before_local(edge), &
+            maxval(abs(aicen_before(i1:i2,j1:j2,:,iblk))), &
+            maxval(abs(vicen_before(i1:i2,j1:j2,:,iblk))), &
+            maxval(abs(vsnon_before(i1:i2,j1:j2,:,iblk))))
+         ghost_after_local(edge) = max(ghost_after_local(edge), &
+            maxval(abs(aicen(i1:i2,j1:j2,:,iblk))), &
+            maxval(abs(vicen(i1:i2,j1:j2,:,iblk))), &
+            maxval(abs(vsnon(i1:i2,j1:j2,:,iblk))))
+         ghost_target_local(edge) = max(ghost_target_local(edge), &
+            maxval(abs(aicen_rest(i1:i2,j1:j2,:,iblk))), &
+            maxval(abs(vicen_rest(i1:i2,j1:j2,:,iblk))), &
+            maxval(abs(vsnon_rest(i1:i2,j1:j2,:,iblk))))
+         changed_local(edge) = changed_local(edge) + &
+            count(aicen(i1:i2,j1:j2,:,iblk) /= aicen_before(i1:i2,j1:j2,:,iblk)) + &
+            count(vicen(i1:i2,j1:j2,:,iblk) /= vicen_before(i1:i2,j1:j2,:,iblk)) + &
+            count(vsnon(i1:i2,j1:j2,:,iblk) /= vsnon_before(i1:i2,j1:j2,:,iblk)) + &
+            count(trcrn(i1:i2,j1:j2,:,:,iblk) /= trcrn_before(i1:i2,j1:j2,:,:,iblk))
+         edge_delta_local(edge) = max(edge_delta_local(edge), &
+            maxval(abs(aicen(i1:i2,j1:j2,:,iblk) - aicen_before(i1:i2,j1:j2,:,iblk))), &
+            maxval(abs(vicen(i1:i2,j1:j2,:,iblk) - vicen_before(i1:i2,j1:j2,:,iblk))), &
+            maxval(abs(vsnon(i1:i2,j1:j2,:,iblk) - vsnon_before(i1:i2,j1:j2,:,iblk))), &
+            maxval(abs(trcrn(i1:i2,j1:j2,:,:,iblk) - trcrn_before(i1:i2,j1:j2,:,:,iblk))))
+
+         do n = 1, ncat
+            do j = j1, j2
+               do i = i1, i2
+                  select case (edge)
+                  case (1)
+                     ibc = ilo
+                     expected_value = merge(c0, aicen_rest(ibc,j,n,iblk), hm(ibc,j,iblk) <= c0)
+                     extension_error_local(edge) = max(extension_error_local(edge), &
+                        abs(aicen_rest(i,j,n,iblk) - expected_value))
+                     expected_value = merge(c0, vicen_rest(ibc,j,n,iblk), hm(ibc,j,iblk) <= c0)
+                     extension_error_local(edge) = max(extension_error_local(edge), &
+                        abs(vicen_rest(i,j,n,iblk) - expected_value))
+                     expected_value = merge(c0, vsnon_rest(ibc,j,n,iblk), hm(ibc,j,iblk) <= c0)
+                     extension_error_local(edge) = max(extension_error_local(edge), &
+                        abs(vsnon_rest(i,j,n,iblk) - expected_value))
+                     do nt = 1, restore_cached_ntrcr
+                        expected_value = merge(c0, trcrn_rest(ibc,j,nt,n,iblk), hm(ibc,j,iblk) <= c0)
+                        extension_error_local(edge) = max(extension_error_local(edge), &
+                           abs(trcrn_rest(i,j,nt,n,iblk) - expected_value))
+                     enddo
+                  case (2)
+                     ibc = ihi
+                     expected_value = merge(c0, aicen_rest(ibc,j,n,iblk), hm(ibc,j,iblk) <= c0)
+                     extension_error_local(edge) = max(extension_error_local(edge), &
+                        abs(aicen_rest(i,j,n,iblk) - expected_value))
+                     expected_value = merge(c0, vicen_rest(ibc,j,n,iblk), hm(ibc,j,iblk) <= c0)
+                     extension_error_local(edge) = max(extension_error_local(edge), &
+                        abs(vicen_rest(i,j,n,iblk) - expected_value))
+                     expected_value = merge(c0, vsnon_rest(ibc,j,n,iblk), hm(ibc,j,iblk) <= c0)
+                     extension_error_local(edge) = max(extension_error_local(edge), &
+                        abs(vsnon_rest(i,j,n,iblk) - expected_value))
+                     do nt = 1, restore_cached_ntrcr
+                        expected_value = merge(c0, trcrn_rest(ibc,j,nt,n,iblk), hm(ibc,j,iblk) <= c0)
+                        extension_error_local(edge) = max(extension_error_local(edge), &
+                           abs(trcrn_rest(i,j,nt,n,iblk) - expected_value))
+                     enddo
+                  case (3)
+                     ibc = jlo
+                     expected_value = merge(c0, aicen_rest(i,ibc,n,iblk), hm(i,ibc,iblk) <= c0)
+                     extension_error_local(edge) = max(extension_error_local(edge), &
+                        abs(aicen_rest(i,j,n,iblk) - expected_value))
+                     expected_value = merge(c0, vicen_rest(i,ibc,n,iblk), hm(i,ibc,iblk) <= c0)
+                     extension_error_local(edge) = max(extension_error_local(edge), &
+                        abs(vicen_rest(i,j,n,iblk) - expected_value))
+                     expected_value = merge(c0, vsnon_rest(i,ibc,n,iblk), hm(i,ibc,iblk) <= c0)
+                     extension_error_local(edge) = max(extension_error_local(edge), &
+                        abs(vsnon_rest(i,j,n,iblk) - expected_value))
+                     do nt = 1, restore_cached_ntrcr
+                        expected_value = merge(c0, trcrn_rest(i,ibc,nt,n,iblk), hm(i,ibc,iblk) <= c0)
+                        extension_error_local(edge) = max(extension_error_local(edge), &
+                           abs(trcrn_rest(i,j,nt,n,iblk) - expected_value))
+                     enddo
+                  case (4)
+                     ibc = jhi
+                     expected_value = merge(c0, aicen_rest(i,ibc,n,iblk), hm(i,ibc,iblk) <= c0)
+                     extension_error_local(edge) = max(extension_error_local(edge), &
+                        abs(aicen_rest(i,j,n,iblk) - expected_value))
+                     expected_value = merge(c0, vicen_rest(i,ibc,n,iblk), hm(i,ibc,iblk) <= c0)
+                     extension_error_local(edge) = max(extension_error_local(edge), &
+                        abs(vicen_rest(i,j,n,iblk) - expected_value))
+                     expected_value = merge(c0, vsnon_rest(i,ibc,n,iblk), hm(i,ibc,iblk) <= c0)
+                     extension_error_local(edge) = max(extension_error_local(edge), &
+                        abs(vsnon_rest(i,j,n,iblk) - expected_value))
+                     do nt = 1, restore_cached_ntrcr
+                        expected_value = merge(c0, trcrn_rest(i,ibc,nt,n,iblk), hm(i,ibc,iblk) <= c0)
+                        extension_error_local(edge) = max(extension_error_local(edge), &
+                           abs(trcrn_rest(i,j,nt,n,iblk) - expected_value))
+                     enddo
+                  end select
+               enddo
+            enddo
+         enddo
+      enddo
+   enddo
+
+   physical_delta_global = global_maxval(physical_delta_local, distrb_info)
+   interior_delta_global = global_maxval(interior_delta_local, distrb_info)
+   land_state_global = global_maxval(land_state_local, distrb_info)
+   do edge = 1, nedge
+      changed_global(edge) = global_sum(changed_local(edge), distrb_info)
+      edge_delta_global(edge) = global_maxval(edge_delta_local(edge), distrb_info)
+      boundary_delta_global(edge) = global_maxval(boundary_delta_local(edge), distrb_info)
+      boundary_struct_global(edge) = global_maxval(boundary_struct_local(edge), distrb_info)
+      boundary_tracer_global(edge) = global_maxval(boundary_tracer_local(edge), distrb_info)
+      extension_error_global(edge) = global_maxval(extension_error_local(edge), distrb_info)
+      ghost_before_global(edge) = global_maxval(ghost_before_local(edge), distrb_info)
+      ghost_after_global(edge) = global_maxval(ghost_after_local(edge), distrb_info)
+      ghost_target_global(edge) = global_maxval(ghost_target_local(edge), distrb_info)
+      wet_ghost_global(edge) = global_sum(wet_ghost_local(edge), distrb_info)
+   enddo
+
+   if (my_task == master_task) then
+      write(nu_diag,'(a,es12.4,a,es12.4,a,es12.4)') &
+         'RESTORE_DIAG physical_max_delta=', physical_delta_global, &
+         ' strict_interior_max_delta=', interior_delta_global, &
+         ' land_structural_max=', land_state_global
+      do edge = 1, nedge
+         write(nu_diag,'(a,a,a,l1,a,i0,a,i0,a,es12.4,a,es12.4,a,es12.4)') &
+            'RESTORE_DIAG edge=', trim(edge_name(edge)), &
+            ' enabled=', edge_enabled(edge), &
+            ' wet_ghost_cells=', wet_ghost_global(edge), &
+            ' changed_elements=', changed_global(edge), &
+            ' ghost_max_delta=', edge_delta_global(edge), &
+            ' boundary_max_delta=', boundary_delta_global(edge), &
+            ' extension_max_error=', extension_error_global(edge)
+         write(nu_diag,'(a,a,a,es12.4,a,es12.4,a,es12.4)') &
+            'RESTORE_DIAG edge=', trim(edge_name(edge)), &
+            ' ghost_struct_before=', ghost_before_global(edge), &
+            ' ghost_struct_target=', ghost_target_global(edge), &
+            ' ghost_struct_after=', ghost_after_global(edge)
+         write(nu_diag,'(a,a,a,es12.4,a,es12.4)') &
+            'RESTORE_DIAG edge=', trim(edge_name(edge)), &
+            ' boundary_struct_delta=', boundary_struct_global(edge), &
+            ' boundary_tracer_delta=', boundary_tracer_global(edge)
+      enddo
+   endif
+
+ end subroutine ice_HaloRestore_diagnostics
+
+!=======================================================================
+
+ subroutine ice_HaloRestore_post_halo_diagnostics(stage)
+
+   use ice_communicate, only: my_task, master_task
+   use ice_domain, only: nblocks, distrb_info
+   use ice_global_reductions, only: global_maxval
+
+   character(len=*), intent(in) :: stage
+
+   integer (int_kind), parameter :: nedge = 4
+   character(len=5), parameter :: edge_name(nedge) = &
+      [character(len=5) :: 'west', 'east', 'south', 'north']
+   logical (log_kind) :: edge_enabled(nedge)
+   integer (int_kind) :: edge, iblk, ilo, ihi, jlo, jhi, ibc
+   integer (int_kind) :: i1, i2, j1, j2
+   real (dbl_kind) :: delta_local(nedge), delta_global(nedge)
+   real (dbl_kind) :: target_error_local(nedge), target_error_global(nedge)
+
+   if (.not. allocated(aicen_restore_diag)) return
+
+   edge_enabled = [restore_ice_use_west, restore_ice_use_east, &
+                   restore_ice_use_south, restore_ice_use_north]
+   delta_local = c0
+   target_error_local = c0
+
+   do iblk = 1, nblocks
+      ilo = restore_cached_ilo(iblk)
+      ihi = restore_cached_ihi(iblk)
+      jlo = restore_cached_jlo(iblk)
+      jhi = restore_cached_jhi(iblk)
+
+      do edge = 1, nedge
+         if (.not. edge_enabled(edge)) cycle
+         if (edge == 1 .and. .not. restore_cached_west_block(iblk)) cycle
+         if (edge == 2 .and. .not. restore_cached_east_block(iblk)) cycle
+         if (edge == 3 .and. .not. restore_cached_south_block(iblk)) cycle
+         if (edge == 4 .and. .not. restore_cached_north_block(iblk)) cycle
+
+         select case (edge)
+         case (1)
+            i1 = 1; i2 = ilo - 1; j1 = jlo; j2 = jhi
+         case (2)
+            ibc = restore_cached_east_bc(iblk)
+            i1 = ihi + 1; i2 = ibc; j1 = jlo; j2 = jhi
+         case (3)
+            i1 = ilo; i2 = ihi; j1 = 1; j2 = jlo - 1
+         case (4)
+            ibc = restore_cached_north_bc(iblk)
+            i1 = ilo; i2 = ihi; j1 = jhi + 1; j2 = ibc
+         end select
+
+         if (i2 < i1 .or. j2 < j1) cycle
+         delta_local(edge) = max(delta_local(edge), &
+            maxval(abs(aicen(i1:i2,j1:j2,:,iblk) - aicen_restore_diag(i1:i2,j1:j2,:,iblk))), &
+            maxval(abs(vicen(i1:i2,j1:j2,:,iblk) - vicen_restore_diag(i1:i2,j1:j2,:,iblk))), &
+            maxval(abs(vsnon(i1:i2,j1:j2,:,iblk) - vsnon_restore_diag(i1:i2,j1:j2,:,iblk))), &
+            maxval(abs(trcrn(i1:i2,j1:j2,:,:,iblk) - trcrn_restore_diag(i1:i2,j1:j2,:,:,iblk))))
+         target_error_local(edge) = max(target_error_local(edge), &
+            maxval(abs(aicen(i1:i2,j1:j2,:,iblk) - aicen_rest(i1:i2,j1:j2,:,iblk))), &
+            maxval(abs(vicen(i1:i2,j1:j2,:,iblk) - vicen_rest(i1:i2,j1:j2,:,iblk))), &
+            maxval(abs(vsnon(i1:i2,j1:j2,:,iblk) - vsnon_rest(i1:i2,j1:j2,:,iblk))), &
+            maxval(abs(trcrn(i1:i2,j1:j2,:,:,iblk) - trcrn_rest(i1:i2,j1:j2,:,:,iblk))))
+      enddo
+   enddo
+
+   do edge = 1, nedge
+      delta_global(edge) = global_maxval(delta_local(edge), distrb_info)
+      target_error_global(edge) = global_maxval(target_error_local(edge), distrb_info)
+   enddo
+
+   if (my_task == master_task) then
+      do edge = 1, nedge
+         if (.not. edge_enabled(edge)) cycle
+         write(nu_diag,'(a,a,a,a,a,es12.4,a,es12.4)') &
+            'RESTORE_POST_HALO stage=', trim(stage), &
+            ' edge=', trim(edge_name(edge)), &
+            ' delta_from_post_restore=', delta_global(edge), &
+            ' target_max_error=', target_error_global(edge)
+      enddo
+   endif
+
+ end subroutine ice_HaloRestore_post_halo_diagnostics
+#endif
 
 !=======================================================================
 
